@@ -247,6 +247,8 @@ with st.sidebar:
                f"{cfg.fees['buyer_fee_pct']:.0%} du prix · Port : "
                + " / ".join(f"{k} {eur(v)}" for k, v in cfg.fees["shipping"].items()))
 
+# Les annonces exclues (faux prix, arnaques, vendeurs non fiables…) ne sont JAMAIS affichées.
+df_all = df_all[df_all["status"] != STATUS_EXCLUDED]
 df = df_all.copy()
 if only_new:
     df = df[df["is_new"]]
@@ -256,7 +258,6 @@ if searches:
     df = df[df["search_name"].isin(searches)]
 df = df[df["price"] <= budget]
 deals = df[df["is_deal"] & (show_review | (df["status"] == STATUS_OK))].sort_values("deal_score", ascending=False)
-excluded = df[df["status"] == STATUS_EXCLUDED]
 
 # --------------------------------------------------------------------------- #
 # En-tête & KPIs
@@ -277,20 +278,21 @@ scan_status()
 
 k = st.columns(5)
 kpis = [
-    ("Annonces analysées", f"{len(df):,}".replace(",", " "),
+    ("Annonces valides", f"{len(df):,}".replace(",", " "),
      f"{int(df['is_new'].sum())} nouvelles" if prev else f"{df['search_name'].nunique()} recherches"),
     ("Bonnes affaires", f"{len(deals)}", f"marge ≥ {min_margin} € et ROI ≥ {min_roi:.0%}"),
     ("Marge potentielle", eur(deals["margin"].head(10).sum(), 0), "sur les 10 meilleures"),
     ("ROI médian", pct(deals["roi"].median()) if len(deals) else "—", "des bonnes affaires"),
-    ("Annonces écartées", f"{len(excluded)}", "faux prix, arnaques, contrefaçons"),
+    ("Meilleure marge", eur(deals["margin"].max(), 0) if len(deals) else "—",
+     html.escape(deals.loc[deals["margin"].idxmax(), "search_name"]) if len(deals) else ""),
 ]
 for col, (l, v, h) in zip(k, kpis):
     col.markdown(f'<div class="kpi"><div class="l">{l}</div><div class="v">{v}</div><div class="h">{h}</div></div>',
                  unsafe_allow_html=True)
 st.write("")
 
-tab_deals, tab_market, tab_excl, tab_calc, tab_method = st.tabs(
-    ["🔥 Bonnes affaires", "📈 Marché", "🛡️ Écartées", "🧮 Calculateur", "ℹ️ Méthode"])
+tab_deals, tab_market, tab_review, tab_calc, tab_method = st.tabs(
+    ["🔥 Bonnes affaires", "📈 Marché", "⚠️ À vérifier", "🧮 Calculateur", "ℹ️ Méthode"])
 
 # --------------------------------------------------------------------------- #
 # Onglet 1 : bonnes affaires
@@ -400,7 +402,6 @@ with tab_market:
         catégorie=("category", "first"), annonces=("id", "count"),
         médiane=("comps_median", "first"), p25=("comps_p25", "first"), p75=("comps_p75", "first"),
         prix_neuf=("prix_neuf", "first"), affaires=("is_deal", "sum"),
-        écartées=("status", lambda s: (s == STATUS_EXCLUDED).sum()),
     ).reset_index().rename(columns={"search_name": "recherche"}).sort_values("affaires", ascending=False))
     st.dataframe(summary, hide_index=True, use_container_width=True, column_config={
         "médiane": st.column_config.NumberColumn("Médiane (TBE)", format="%.0f €"),
@@ -412,42 +413,13 @@ with tab_market:
 # --------------------------------------------------------------------------- #
 # Onglet 3 : annonces écartées
 # --------------------------------------------------------------------------- #
-with tab_excl:
-    st.markdown("#### Pourquoi ces annonces ont été écartées")
-    st.caption("Elles ne sont jamais proposées comme bonnes affaires et ne servent pas au calcul des prix de marché "
-               "(sinon un faux prix à 1 € tirerait la médiane vers le bas).")
-    import json
-    reasons = {}
-    for fj in excluded["flags_json"]:
-        for f in json.loads(fj):
-            if f["hard"] or f["weight"] >= 30:
-                lab = f["label"].split(":")[0].split("(")[0].strip()
-                reasons[lab] = reasons.get(lab, 0) + 1
-    if reasons:
-        rs = pd.Series(reasons).sort_values()
-        bar = go.Figure(go.Bar(x=rs.values, y=rs.index, orientation="h", marker=dict(color=BLUE),
-                               text=rs.values, textposition="outside", cliponaxis=False,
-                               hovertemplate="%{y} : %{x} annonce(s)<extra></extra>"))
-        bar.update_traces(marker_line_width=0)
-        bar.update_layout(height=60 + 34 * len(rs), plot_bgcolor=SURFACE, paper_bgcolor="rgba(0,0,0,0)",
-                          margin=dict(l=10, r=40, t=10, b=10), bargap=0.35,
-                          font=dict(family="system-ui, -apple-system, Segoe UI, sans-serif", color=INK2, size=13),
-                          xaxis=dict(visible=False), yaxis=dict(title=None))
-        st.plotly_chart(bar, use_container_width=True, config={"displayModeBar": False})
-    ex = excluded[["title", "search_name", "price", "real_price_mentioned", "risk_score", "flags_text",
-                   "description", "url"]]
-    st.dataframe(ex, hide_index=True, use_container_width=True, height=420, column_config={
-        "title": "Annonce", "search_name": "Recherche",
-        "price": st.column_config.NumberColumn("Prix affiché", format="%.2f €"),
-        "real_price_mentioned": st.column_config.NumberColumn("Vrai prix (texte)", format="%.0f €"),
-        "risk_score": st.column_config.ProgressColumn("Risque", min_value=0, max_value=100, format="%d"),
-        "flags_text": st.column_config.TextColumn("Raisons", width="large"),
-        "description": st.column_config.TextColumn("Description", width="large"),
-        "url": st.column_config.LinkColumn("Lien", display_text="Ouvrir ↗"),
-    })
+with tab_review:
     review = df[df["status"] == STATUS_REVIEW]
-    if len(review):
-        st.markdown("#### À vérifier avant d'acheter")
+    st.caption("Rentables sur le papier mais avec un signal à contrôler (prix très bas sur une marque contrefaite, "
+               "profil vendeur illisible…). Les annonces exclues, elles, n'apparaissent nulle part.")
+    if review.empty:
+        st.info("Rien à vérifier pour l'instant.")
+    else:
         st.dataframe(review[["title", "search_name", "price", "margin", "flags_text", "url"]], hide_index=True,
                      use_container_width=True, column_config={
                          "price": st.column_config.NumberColumn("Prix", format="%.2f €"),
