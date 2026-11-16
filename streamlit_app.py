@@ -78,6 +78,14 @@ def eur(x, dec=2):
     return f"{s} €"
 
 
+def seller_txt(rating, count) -> str:
+    if pd.notna(count) and int(count) == 0:
+        return "nouveau, 0 avis"
+    if pd.isna(rating):
+        return "—"
+    return f"★ {rating:.1f} ({int(count)} avis)".replace(".", ",") if pd.notna(count) else f"★ {rating:.1f}"
+
+
 def pct(x):
     return "—" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.0%}"
 
@@ -218,6 +226,9 @@ Vinted bloque souvent les serveurs (Streamlit Cloud, GitHub). Deux solutions :
 """)
     st.stop()
 
+for _c in ("seller_rating", "seller_feedback_count", "seller_items_sold"):
+    if _c not in df_raw:
+        df_raw[_c] = np.nan
 df_all = recompute(df_raw, 0.123 if social else cfg.resale["social_contributions_pct"], min_margin, min_roi)
 prev = previous_ids()
 df_all["is_new"] = ~df_all["id"].astype(str).isin(prev) if prev else False
@@ -309,6 +320,7 @@ with tab_deals:
   <div class="row"><span>Revente estimée</span><b>{eur(r['resale_price'])}</b></div>
   <div class="row"><span>Sous le marché</span><b>{pct(r['discount_vs_market'])}</b></div>
   {neuf}
+  <div class="row"><span>Vendeur</span><b>{seller_txt(r['seller_rating'], r['seller_feedback_count'])}</b></div>
   <div class="row" style="align-items:baseline"><span>Marge nette · ROI {pct(r['roi'])}</span>
       <span class="margin">+{eur(r['margin'])}</span></div>
   <div class="bar"><div style="width:{r['deal_score']:.0f}%"></div></div>
@@ -320,8 +332,8 @@ with tab_deals:
 
         st.markdown("#### Toutes les bonnes affaires")
         table = deals[["photo_url", "is_new", "title", "search_name", "condition", "price", "total_cost", "resale_price",
-                       "margin", "roi", "max_buy_price", "discount_vs_market", "decote_neuf", "deal_score",
-                       "status", "url"]].copy()
+                       "margin", "roi", "max_buy_price", "discount_vs_market", "decote_neuf", "seller_rating", "seller_feedback_count",
+                       "deal_score", "status", "url"]].copy()
         table["roi"] *= 100
         table["discount_vs_market"] *= 100
         table["decote_neuf"] *= 100
@@ -343,6 +355,8 @@ with tab_deals:
                                                      "(la limite des futurs agents de négociation)"),
                 "discount_vs_market": st.column_config.NumberColumn("Sous marché", format="%.0f %%"),
                 "decote_neuf": st.column_config.NumberColumn("Décote neuf", format="%.0f %%"),
+                "seller_rating": st.column_config.NumberColumn("Note vendeur", format="%.1f ★"),
+                "seller_feedback_count": st.column_config.NumberColumn("Avis", format="%d"),
                 "deal_score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.0f"),
                 "status": "Statut",
                 "url": st.column_config.LinkColumn("Lien", display_text="Ouvrir ↗"),
@@ -486,9 +500,10 @@ with tab_method:
    - **pas l'article** : boîte vide, photo, pour pièces ; **pas une vente** : réservé, recherche, échange uniquement.
    Les montants « acheté 120 € en boutique » sont reconnus comme **prix neuf**, pas comme faux prix.
 3. **Prix de marché** : médiane des annonces comparables *saines* (hors faux prix, lots, tailles enfant, hors-sujet), ramenées à l'état « Très bon état ».
-4. **Signaux statistiques** : prix < {cfg.thresholds['too_good_ratio']:.0%} de la médiane (< {cfg.thresholds['luxury_too_good_ratio']:.0%} pour les marques très contrefaites) → « trop beau pour être vrai ».
-5. **Marge** = revente estimée (médiane × état × {cfg.resale['asking_to_sold_ratio']:.0%}, car les prix affichés ne sont pas les prix vendus) − emballage − cotisations − (prix + 0,70 € + 5 % + port).
-6. **Score** /100 : décote vs marché, marge, ROI, décote vs neuf, liquidité de la catégorie, favoris, moins le risque.
+4. **Fiabilité du vendeur** : note ≤ {cfg.raw.get('seller', {}).get('min_rating', 3.5)}★ avec au moins {cfg.raw.get('seller', {}).get('min_reviews_for_rating', 3)} avis → exclu ; mauvaise note sur moins d'avis → à vérifier ; compte sans avis → signalé si le prix est anormalement bas.
+5. **Signaux statistiques** : prix < {cfg.thresholds['too_good_ratio']:.0%} de la médiane (< {cfg.thresholds['luxury_too_good_ratio']:.0%} pour les marques très contrefaites) → « trop beau pour être vrai ».
+6. **Marge** = revente estimée (médiane × état × {cfg.resale['asking_to_sold_ratio']:.0%}, car les prix affichés ne sont pas les prix vendus) − emballage − cotisations − (prix + 0,70 € + 5 % + port).
+7. **Score** /100 : décote vs marché, marge, ROI, décote vs neuf, liquidité de la catégorie, favoris, moins le risque.
 
 **Limites** : les prix de marché sont des prix *demandés* ; le prix neuf vient d'un fichier de référence indicatif
 (`data/reference_prices.csv`, à compléter) ; une annonce « ok » n'est pas une garantie d'authenticité —

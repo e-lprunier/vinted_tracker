@@ -61,6 +61,18 @@ def _collect_vinted(cfg: Config, searches, progress) -> list[Listing]:
         progress(f"Lecture des descriptions ({j + 1}/{len(to_detail)})",
                  (len(searches) + j / max(len(to_detail), 1)) / total)
         l.description = client.fetch_description(l)
+    if cfg.raw.get("seller", {}).get("check_reviews", True):
+        cache: dict[str, dict | None] = {}
+        ids = sorted({l.seller_id for l in to_detail if l.seller_id})
+        for j, sid in enumerate(ids):
+            progress(f"Avis des vendeurs ({j + 1}/{len(ids)})", 0.97)
+            cache[sid] = client.fetch_seller(sid)
+        for l in to_detail:
+            info = cache.get(l.seller_id)
+            if info:
+                l.seller_rating, l.seller_feedback_count = info["rating"], info["count"]
+                l.seller_items_sold = info["sold"]
+                l.seller_login = l.seller_login or info["login"]
     return listings
 
 

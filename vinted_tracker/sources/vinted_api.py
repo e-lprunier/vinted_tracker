@@ -141,6 +141,7 @@ def parse_catalog_item(raw: dict, search: Search, domain: str) -> Listing:
         url=url,
         photo_url=photo_url or "",
         seller_login=user.get("login", "") if isinstance(user, dict) else "",
+        seller_id=str(user.get("id") or "") if isinstance(user, dict) else "",
         favourites=int(raw.get("favourite_count") or raw.get("favourites_count") or 0),
         views=int(raw.get("view_count") or 0),
         source="vinted_api",
@@ -164,6 +165,30 @@ def extract_description(page_html: str) -> str:
         if m:
             return html_lib.unescape(m.group(1))
     return ""
+
+
+def extract_seller_id(page_html: str) -> str:
+    """Identifiant du vendeur depuis la page de l'annonce (lien /member/<id>-<login>)."""
+    m = re.search(r'"user_id"\s*:\s*(\d+)', page_html) or re.search(r'/member/(\d+)', page_html)
+    return m.group(1) if m else ""
+
+
+def parse_seller(user: dict) -> dict:
+    """Profil Vinted -> note /5, nombre d'avis, articles vendus.
+
+    `feedback_reputation` est entre 0 et 1 (×5 = étoiles affichées sur le profil).
+    """
+    rep = user.get("feedback_reputation")
+    count = user.get("feedback_count")
+    if count is None:
+        parts = [user.get(k) for k in ("positive_feedback_count", "neutral_feedback_count", "negative_feedback_count")]
+        count = sum(int(x) for x in parts if x is not None) if any(x is not None for x in parts) else None
+    rating = round(float(rep) * 5, 2) if rep is not None else None
+    if rating is not None and count == 0:
+        rating = None                      # pas d'avis = pas de note (Vinted renvoie 0)
+    sold = user.get("given_item_count", user.get("sold_items_count"))
+    return {"rating": rating, "count": int(count) if count is not None else None,
+            "sold": int(sold) if sold is not None else None, "login": user.get("login", "")}
 
 
 # --------------------------------------------------------------------------- #
@@ -257,6 +282,25 @@ class VintedClient:
             if new == 0 or len(items) < per_page:
                 break
 
+    def fetch_seller(self, user_id: str) -> dict | None:
+        """Note et nombre d'avis du vendeur (endpoint profil, resté sur l'hôte www)."""
+        if not user_id:
+            return None
+        try:
+            self._sleep()
+            r = self.session.get(f"{self.www}/api/v2/users/{user_id}", timeout=30, headers={
+                **self._api_headers(), "Referer": f"{self.www}/member/{user_id}"})
+            if r.status_code in (403, 429):
+                raise VintedBlocked(f"{r.status_code} sur un profil vendeur")
+            if r.status_code != 200:
+                return None
+            user = r.json().get("user") or {}
+            return parse_seller(user) if user else None
+        except VintedBlocked:
+            raise
+        except Exception:
+            return None
+
     def fetch_description(self, listing: Listing) -> str:
         """La recherche ne renvoie pas la description : on la lit sur la page de l'annonce."""
         try:
@@ -264,7 +308,11 @@ class VintedClient:
             r = self.session.get(listing.url, timeout=30, headers={"Accept-Language": f"{self.locale},fr;q=0.9"})
             if r.status_code in (403, 429):
                 raise VintedBlocked(f"{r.status_code} sur la page d'une annonce")
-            return extract_description(r.text) if r.status_code == 200 else ""
+            if r.status_code != 200:
+                return ""
+            if not listing.seller_id:
+                listing.seller_id = extract_seller_id(r.text)
+            return extract_description(r.text)
         except VintedBlocked:
             raise
         except Exception:

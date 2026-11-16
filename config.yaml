@@ -57,6 +57,13 @@ thresholds:
   too_good_ratio: 0.15      # prix < 15 % de la médiane = trop beau pour être vrai
   luxury_too_good_ratio: 0.35  # idem pour les marques très contrefaites
 
+# --- Fiabilité du vendeur (note et avis du profil) ----------------------------
+seller:
+  check_reviews: true          # lit le profil du vendeur des annonces candidates (1 requête / vendeur)
+  min_rating: 3.5              # note ≤ 3,5/5 -> exclue (il faut strictement plus)
+  min_reviews_for_rating: 3    # en dessous, une mauvaise note ne fait que signaler ("à vérifier")
+  exclude_no_reviews: false    # true = exclure aussi les comptes sans aucun avis
+
 # --- Ajustement par état (ramène tout à un équivalent "Très bon état") -------
 condition_factors:
   "Neuf avec étiquette": 1.25

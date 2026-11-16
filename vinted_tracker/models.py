@@ -20,6 +20,8 @@ class Listing:
     url: str = ""
     photo_url: str = ""
     seller_login: str = ""
+    seller_id: str = ""
+    seller_items_sold: int | None = None
     seller_feedback_count: int | None = None
     seller_rating: float | None = None
     favourites: int = 0

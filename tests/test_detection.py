@@ -127,3 +127,27 @@ def test_parse_svc_catalogue_item():
     assert split_second_line("Neuf avec étiquette") == ("", "Neuf avec étiquette")
     page = '<head><meta property="og:description" content="Prix r&eacute;el 90&euro;, ne pas acheter"></head>'
     assert extract_description(page).startswith("Prix réel 90")
+
+
+# --- Note du vendeur ---------------------------------------------------------
+def test_parse_seller_profile():
+    from vinted_tracker.sources.vinted_api import extract_seller_id, parse_seller
+    assert parse_seller({"feedback_reputation": 0.96, "feedback_count": 127, "given_item_count": 80}) == \
+        {"rating": 4.8, "count": 127, "sold": 80, "login": ""}
+    assert parse_seller({"feedback_reputation": 0, "feedback_count": 0})["rating"] is None
+    assert extract_seller_id('<a href="/member/123456-bob">bob</a>') == "123456"
+
+
+@pytest.mark.parametrize("rating,count,expected", [
+    (3.0, 25, "exclu"),          # mal noté avec assez d'avis -> exclu
+    (3.5, 64, "exclu"),          # 3,5 pile -> exclu ("pas plus de 3,5")
+    (3.0, 2, "à vérifier"),      # mal noté mais 2 avis -> signalé seulement
+    (4.9, 140, "ok"),            # bon vendeur -> rien
+])
+def test_seller_rating_rule(rating, count, expected):
+    from fake_listings import generate_demo
+    listings = [l for l in generate_demo(CFG) if l.search_name == "Adidas Samba"]
+    target = next(l for l in listings if "Très peu porté" in l.description)
+    target.seller_rating, target.seller_feedback_count = rating, count
+    df = analyze(listings, CFG)
+    assert df.loc[df["id"] == target.id, "status"].iloc[0] == expected

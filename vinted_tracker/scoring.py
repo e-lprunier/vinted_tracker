@@ -118,10 +118,20 @@ def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = Non
                 label = ("Trop beau pour être vrai — risque de contrefaçon" if r["counterfeit_risk"]
                          else "Trop beau pour être vrai")
                 flags.append(Flag("too_good", f"{label} ({ratio:.0%} de la médiane)", 45))
-        fb = r.get("seller_feedback_count")
-        if pd.notna(fb) and int(fb) == 0 \
-                and not math.isnan(ratio) and ratio < 0.5:
-            flags.append(Flag("new_seller", "Vendeur sans évaluation + prix très bas", 15))
+        fb, rating = r.get("seller_feedback_count"), r.get("seller_rating")
+        sc = cfg.raw.get("seller", {})
+        min_rating, min_n = sc.get("min_rating", 3.5), sc.get("min_reviews_for_rating", 3)
+        if pd.notna(rating) and pd.notna(fb) and int(fb) > 0 and rating <= min_rating:
+            label = f"Vendeur mal noté ({rating:.1f}★ sur {int(fb)} avis)".replace(".", ",")
+            if int(fb) >= min_n:
+                flags.append(Flag("bad_seller", label, 70, hard=True))
+            else:
+                flags.append(Flag("bad_seller_few", label + " — trop peu d'avis pour conclure", 30))
+        elif pd.notna(fb) and int(fb) == 0:
+            if sc.get("exclude_no_reviews", False):
+                flags.append(Flag("no_reviews", "Vendeur sans aucun avis", 60, hard=True))
+            elif not math.isnan(ratio) and ratio < 0.5:
+                flags.append(Flag("new_seller", "Vendeur sans évaluation + prix très bas", 15))
 
         risk = min(100, sum(f.weight for f in flags))
         hard = any(f.hard for f in flags)
