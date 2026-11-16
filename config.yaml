@@ -63,13 +63,24 @@ seller:
   min_rating: 3.5              # note ≤ 3,5/5 -> exclue (il faut strictement plus)
   min_reviews: 3               # moins de 3 avis (0 compris) -> exclue : souvent des faux comptes
 
+# --- Comparables : articles identiques ou très proches -------------------------
+comparables:
+  min_similar: 5     # nb mini d'annonces identiques (modèle/couleur/taille) ; sinon on élargit
+                     # (thresholds.min_comps s'applique au repli « recherche entière »)
+
+# --- Demande (favoris) -----------------------------------------------------------
+demand:
+  hot_favs_per_hour: 2      # >= 2 favoris/heure depuis l'apparition de l'annonce = forte demande
+  hot_min_favourites: 10    # ou >= 10 favoris ET 2x plus que les annonces comparables
+  hot_ratio: 2
+
 # --- Ajustement par état (ramène tout à un équivalent "Très bon état") -------
 condition_factors:
   "Neuf avec étiquette": 1.25
-  "Neuf sans étiquette": 1.15
-  "Très bon état": 1.00
-  "Bon état": 0.85
-  "Satisfaisant": 0.65
+  "Neuf sans étiquette": 1.05     # entre 1 et 1,1
+  "Très bon état": 1.00           # valeur de référence
+  "Bon état": 0.75
+  "Satisfaisant": 0.50
 
 # --- Analyse texte par LLM (optionnelle) --------------------------------------
 llm:

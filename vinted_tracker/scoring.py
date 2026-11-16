@@ -14,6 +14,7 @@ import pandas as pd
 from .config import Config
 from .models import Flag, Listing
 from .pricing import compute_margin, purchase_cost
+from .comparables import add_attributes, compute_comps
 from .text_analysis import analyze_listing
 
 STATUS_OK, STATUS_REVIEW, STATUS_EXCLUDED, STATUS_NA = "ok", "à vérifier", "exclu", "non comparable"
@@ -29,21 +30,22 @@ def _clip01(x: float) -> float:
 
 
 def deal_score(discount: float, margin: float, roi: float, decote_neuf: float | None,
-               liquidity: int, favourites: int, risk: int) -> float:
+               liquidity: int, demand_ratio: float, risk: int, hot: bool = False) -> float:
     """Score 0-100. Pondérations volontairement simples et lisibles."""
     s = 0.0
     s += 35 * _clip01(discount / 0.6)            # décote vs marché (60 % sous la médiane = max)
     s += 25 * _clip01(margin / 30)               # 30 € de marge nette = max
     s += 15 * _clip01(roi / 1.0)                 # 100 % de ROI = max
     s += 10 * _clip01((decote_neuf or 0) / 0.8)  # 80 % sous le prix neuf = max
-    s += 10 * _clip01((liquidity - 1) / 2) * 0.6 + 10 * _clip01(favourites / 20) * 0.4
+    # demande : liquidité de la catégorie + favoris vs annonces comparables (+ bonus si forte demande)
+    s += 4 * _clip01((liquidity - 1) / 2) + 6 * _clip01((demand_ratio or 0) / 3) + (3 if hot else 0)
     s += 5                                       # bonus de base pour les annonces saines
     s -= 0.4 * risk
     return round(max(0.0, min(100.0, s)), 1)
 
 
 def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = None,
-            llm_checker=None) -> pd.DataFrame:
+            llm_checker=None, first_seen: dict[str, str] | None = None) -> pd.DataFrame:
     if not listings:
         return pd.DataFrame()
 
@@ -74,33 +76,42 @@ def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = Non
     for col in ("retail_price_mentioned", "real_price_mentioned", "seller_feedback_count", "seller_rating"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # 2) comparables par recherche (on exclut faux prix, lots, hors-sujet) ----
-    clean = df[~df["_hard"] & ~df["is_lot"] & ~df["is_off_topic"] & (df["price"] > 2)]
-    q = cfg.resale["resale_quantile"]
-    stats = clean.groupby("search_name")["price_norm"].agg(
-        comps_n="count",
-        comps_median="median",
-        comps_q=lambda s: s.quantile(q),
-        comps_p25=lambda s: s.quantile(0.25),
-        comps_p75=lambda s: s.quantile(0.75),
-        comps_mad=lambda s: (s - s.median()).abs().median(),
-    ).reset_index()
-    df = df.merge(stats, on="search_name", how="left")
-    df["comps_n"] = df["comps_n"].fillna(0).astype(int)
-
-    sorted_comps = {k: np.sort(g.values) for k, g in clean.groupby("search_name")["price_norm"]}
-
-    def pct_rank(row):
-        arr = sorted_comps.get(row["search_name"])
-        if arr is None or len(arr) == 0:
-            return np.nan
-        return float(np.searchsorted(arr, row["price_norm"], side="right")) / len(arr)
-
-    df["price_percentile"] = df.apply(pct_rank, axis=1)
+    # 2) comparables fins : modèle / couleur / taille, avec repli -------------
+    #    (faux prix, lots, tailles enfant et hors-sujet ne servent jamais de comparables)
+    queries = {sr.name: sr.query for sr in cfg.searches}
+    df = add_attributes(df, queries)
+    eligible = ~df["_hard"] & ~df["is_lot"] & ~df["is_off_topic"] & (df["price"] > 2)
+    cc = cfg.raw.get("comparables", {})
+    stats = compute_comps(df, eligible, cfg.resale["resale_quantile"],
+                          cc.get("min_similar", 5), th["min_comps"])
+    df = df.join(stats)
     df["ratio_to_median"] = df["price_norm"] / df["comps_median"]
     df["discount_vs_market"] = 1 - df["ratio_to_median"]
     mad = df["comps_mad"].replace(0, np.nan) * 1.4826
     df["robust_z"] = (df["price_norm"] - df["comps_median"]) / mad
+
+    # 2b) demande : favoris, et favoris par heure depuis la première apparition
+    now = pd.Timestamp.now(tz="UTC")
+    first_seen = first_seen or {}
+    ids = df["id"].astype(str)
+    has_history = bool(first_seen)
+    ts = pd.to_datetime(ids.map(lambda i: first_seen.get(i, {}).get("ts")), utc=True, errors="coerce",
+                        format="ISO8601")
+    # âge fiable seulement pour les annonces apparues APRÈS le premier scan
+    # (une annonce jamais vue alors qu'on a un historique vient juste d'apparaître)
+    real = ids.map(lambda i: first_seen[i]["real"] if i in first_seen else has_history).astype(bool)
+    df["first_seen"] = ts.fillna(now) if has_history else ts
+    age = ((now - df["first_seen"]).dt.total_seconds() / 3600).clip(lower=0.5) if has_history \
+        else pd.Series(np.nan, index=df.index)
+    df["age_hours"] = age.where(real)
+    favs = pd.to_numeric(df["favourites"], errors="coerce").fillna(0)
+    df["fav_per_hour"] = favs / df["age_hours"]
+    df["demand_ratio"] = favs / df["comps_fav_median"].fillna(0).clip(lower=1)
+    dc = cfg.raw.get("demand", {})
+    hot = (df["fav_per_hour"] >= dc.get("hot_favs_per_hour", 2)) | \
+          ((favs >= dc.get("hot_min_favourites", 10)) & (df["demand_ratio"] >= dc.get("hot_ratio", 2)))
+    df["demand_level"] = np.where(hot, "forte", np.where(df["demand_ratio"] >= 1, "moyenne", "faible"))
+    df.loc[favs.eq(0) & df["comps_fav_median"].fillna(0).eq(0), "demand_level"] = "inconnue"
 
     # 3) signaux statistiques + score de risque --------------------------------
     statuses, risks, flags_json, flag_labels = [], [], [], []
@@ -108,7 +119,7 @@ def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = Non
         flags: list[Flag] = list(r["_flags"])
         ratio = r["ratio_to_median"]
         median = r["comps_median"]
-        enough = r["comps_n"] >= th["min_comps"]
+        enough = bool(r["comps_level"])
         if enough and r["price"] <= 2 and median >= 15:
             flags.append(Flag("placeholder_low", f"Prix symbolique ({r['price']:.0f} €) vs marché {median:.0f} €",
                               60, hard=True))
@@ -170,7 +181,7 @@ def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = Non
         if rp and not (isinstance(rp, float) and math.isnan(rp)) and r["comps_median"] == r["comps_median"]:
             if r["comps_median"] * 0.8 <= rp <= r["comps_median"] * 15:
                 prix_neuf, source_neuf = float(rp), "annonce"
-        if r["comps_n"] > 0 and r["comps_q"] == r["comps_q"]:
+        if r["comps_level"] and r["comps_q"] == r["comps_q"]:
             resale_price = r["comps_q"] * r["cond_factor"] * cfg.resale["asking_to_sold_ratio"]
             m = compute_margin(r["price"], resale_price, r["size_class"], cfg, social_pct)
             total_cost, resale, net, margin, roi, max_buy = (
@@ -182,7 +193,8 @@ def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = Non
         disc = r["discount_vs_market"]
         score = deal_score(0 if disc != disc else disc, 0 if margin != margin else margin,
                            0 if roi != roi else roi, None if decote != decote else decote,
-                           r["liquidity"], int(r["favourites"] or 0), r["risk_score"]) \
+                           r["liquidity"], 0 if pd.isna(r["demand_ratio"]) else r["demand_ratio"],
+                           r["risk_score"], r["demand_level"] == "forte") \
             if r["status"] in (STATUS_OK, STATUS_REVIEW) else 0.0
         is_deal = bool(r["status"] in (STATUS_OK, STATUS_REVIEW) and margin == margin
                        and margin >= th["min_margin_eur"] and roi >= th["min_roi"])
@@ -190,4 +202,4 @@ def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = Non
                         resale_price=resale, resale_net=net, margin=margin, roi=roi,
                         max_buy_price=max_buy, decote_neuf=decote, deal_score=score, is_deal=is_deal))
     df = pd.concat([df.reset_index(drop=True), pd.DataFrame(out)], axis=1)
-    return df.drop(columns=["_flags", "_hard"]).sort_values("deal_score", ascending=False).reset_index(drop=True)
+    return df.drop(columns=["_flags", "_hard", "model_tokens"], errors="ignore").sort_values("deal_score", ascending=False).reset_index(drop=True)

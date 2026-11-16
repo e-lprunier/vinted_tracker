@@ -86,6 +86,15 @@ def seller_txt(rating, count) -> str:
     return f"★ {rating:.1f} ({int(count)} avis)".replace(".", ",") if pd.notna(count) else f"★ {rating:.1f}"
 
 
+def demand_txt(r) -> str:
+    lvl = r.get("demand_level", "inconnue")
+    favs = int(r["favourites"] or 0) if pd.notna(r.get("favourites")) else 0
+    fph = r.get("fav_per_hour")
+    rate = f" · {fph:.1f}/h".replace(".", ",") if pd.notna(fph) and fph > 0 else ""
+    icon = {"forte": "🔥 Forte", "moyenne": "Moyenne", "faible": "Faible"}.get(lvl, "—")
+    return f"{icon} ({favs} favoris{rate})" if lvl != "inconnue" else "—"
+
+
 def pct(x):
     return "—" if x is None or (isinstance(x, float) and np.isnan(x)) else f"{x:.0%}"
 
@@ -156,7 +165,8 @@ def recompute(df: pd.DataFrame, social_pct: float, min_margin: float, min_roi: f
         deal_score(0 if pd.isna(x.discount_vs_market) else x.discount_vs_market,
                    0 if pd.isna(x.margin) else x.margin, 0 if pd.isna(x.roi) else x.roi,
                    None if pd.isna(x.decote_neuf) else x.decote_neuf, int(x.liquidity),
-                   int(x.favourites or 0), int(x.risk_score)) if h else 0.0
+                   0 if pd.isna(getattr(x, "demand_ratio", np.nan)) else x.demand_ratio, int(x.risk_score),
+                   getattr(x, "demand_level", "") == "forte") if h else 0.0
         for x, h in zip(d.itertuples(), healthy)]
     return d
 
@@ -226,9 +236,12 @@ Vinted bloque souvent les serveurs (Streamlit Cloud, GitHub). Deux solutions :
 """)
     st.stop()
 
-for _c in ("seller_rating", "seller_feedback_count", "seller_items_sold"):
+for _c in ("seller_rating", "seller_feedback_count", "seller_items_sold", "fav_per_hour", "demand_ratio"):
     if _c not in df_raw:
         df_raw[_c] = np.nan
+for _c, _v in (("comps_level", "recherche entière"), ("demand_level", "inconnue")):
+    if _c not in df_raw:
+        df_raw[_c] = _v
 df_all = recompute(df_raw, 0.123 if social else cfg.resale["social_contributions_pct"], min_margin, min_roi)
 prev = previous_ids()
 df_all["is_new"] = ~df_all["id"].astype(str).isin(prev) if prev else False
@@ -237,6 +250,8 @@ with st.sidebar:
     st.markdown("**Filtres**")
     only_new = st.checkbox("🆕 Nouvelles annonces seulement", value=False, disabled=not prev,
                            help="Annonces apparues depuis le scan précédent.")
+    only_hot = st.checkbox("🔥 Forte demande seulement", value=False,
+                           help="Beaucoup de favoris vs les annonces comparables, ou beaucoup de favoris par heure.")
     cats = st.multiselect("Catégories", sorted(df_all["category"].unique()), placeholder="Toutes")
     searches = st.multiselect("Recherches", sorted(df_all["search_name"].unique()), placeholder="Toutes")
     budget = st.slider("Prix d'achat max", 5, 400, 400, step=5, format="%d €")
@@ -252,6 +267,8 @@ df_all = df_all[df_all["status"] != STATUS_EXCLUDED]
 df = df_all.copy()
 if only_new:
     df = df[df["is_new"]]
+if only_hot:
+    df = df[df["demand_level"] == "forte"]
 if cats:
     df = df[df["category"].isin(cats)]
 if searches:
@@ -322,6 +339,8 @@ with tab_deals:
   <div class="row"><span>Revente estimée</span><b>{eur(r['resale_price'])}</b></div>
   <div class="row"><span>Sous le marché</span><b>{pct(r['discount_vs_market'])}</b></div>
   {neuf}
+  <div class="row"><span>Comparé à</span><b>{int(r['comps_n'])} annonces · {html.escape(str(r['comps_level']))}</b></div>
+  <div class="row"><span>Demande</span><b>{demand_txt(r)}</b></div>
   <div class="row"><span>Vendeur</span><b>{seller_txt(r['seller_rating'], r['seller_feedback_count'])}</b></div>
   <div class="row" style="align-items:baseline"><span>Marge nette · ROI {pct(r['roi'])}</span>
       <span class="margin">+{eur(r['margin'])}</span></div>
@@ -334,8 +353,8 @@ with tab_deals:
 
         st.markdown("#### Toutes les bonnes affaires")
         table = deals[["photo_url", "is_new", "title", "search_name", "condition", "price", "total_cost", "resale_price",
-                       "margin", "roi", "max_buy_price", "discount_vs_market", "decote_neuf", "seller_rating", "seller_feedback_count",
-                       "deal_score", "status", "url"]].copy()
+                       "margin", "roi", "max_buy_price", "discount_vs_market", "decote_neuf", "comps_level", "comps_n", "favourites", "demand_level",
+                       "seller_rating", "seller_feedback_count", "deal_score", "status", "url"]].copy()
         table["roi"] *= 100
         table["discount_vs_market"] *= 100
         table["decote_neuf"] *= 100
@@ -357,6 +376,10 @@ with tab_deals:
                                                      "(la limite des futurs agents de négociation)"),
                 "discount_vs_market": st.column_config.NumberColumn("Sous marché", format="%.0f %%"),
                 "decote_neuf": st.column_config.NumberColumn("Décote neuf", format="%.0f %%"),
+                "comps_level": st.column_config.TextColumn("Comparé sur", help="Niveau de précision des comparables"),
+                "comps_n": st.column_config.NumberColumn("Nb comp.", format="%d"),
+                "favourites": st.column_config.NumberColumn("Favoris", format="%d"),
+                "demand_level": st.column_config.TextColumn("Demande"),
                 "seller_rating": st.column_config.NumberColumn("Note vendeur", format="%.1f ★"),
                 "seller_feedback_count": st.column_config.NumberColumn("Avis", format="%d"),
                 "deal_score": st.column_config.ProgressColumn("Score", min_value=0, max_value=100, format="%.0f"),
@@ -400,14 +423,15 @@ with tab_market:
     st.markdown("#### Synthèse par recherche")
     summary = (df.groupby("search_name").agg(
         catégorie=("category", "first"), annonces=("id", "count"),
-        médiane=("comps_median", "first"), p25=("comps_p25", "first"), p75=("comps_p75", "first"),
-        prix_neuf=("prix_neuf", "first"), affaires=("is_deal", "sum"),
+        médiane=("comps_median", "median"), p25=("comps_p25", "median"), p75=("comps_p75", "median"),
+        prix_neuf=("prix_neuf", "first"), favoris=("favourites", "median"), affaires=("is_deal", "sum"),
     ).reset_index().rename(columns={"search_name": "recherche"}).sort_values("affaires", ascending=False))
     st.dataframe(summary, hide_index=True, use_container_width=True, column_config={
         "médiane": st.column_config.NumberColumn("Médiane (TBE)", format="%.0f €"),
         "p25": st.column_config.NumberColumn("25e centile", format="%.0f €"),
         "p75": st.column_config.NumberColumn("75e centile", format="%.0f €"),
         "prix_neuf": st.column_config.NumberColumn("Prix neuf (réf.)", format="%.0f €"),
+        "favoris": st.column_config.NumberColumn("Favoris (médiane)", format="%.0f"),
     })
 
 # --------------------------------------------------------------------------- #
@@ -471,11 +495,12 @@ with tab_method:
    - **contrefaçon avouée** : replica, 1:1, copie, « pas authentique »… (« pas de fake » n'est *pas* compté) ;
    - **pas l'article** : boîte vide, photo, pour pièces ; **pas une vente** : réservé, recherche, échange uniquement.
    Les montants « acheté 120 € en boutique » sont reconnus comme **prix neuf**, pas comme faux prix.
-3. **Prix de marché** : médiane des annonces comparables *saines* (hors faux prix, lots, tailles enfant, hors-sujet), ramenées à l'état « Très bon état ».
+3. **Prix de marché** : médiane des annonces *identiques ou très proches* — même modèle, même couleur, même taille (tailles voisines regroupées) — en élargissant automatiquement (modèle + couleur → modèle → couleur → recherche entière) tant qu'il y a moins de {cfg.raw.get('comparables', {}).get('min_similar', 5)} annonces. Prix ramenés à « Très bon état » : neuf avec étiquette ×1,25 · neuf sans étiquette ×1,05 · TBE ×1 · bon état ×0,75 · satisfaisant ×0,5.
 4. **Fiabilité du vendeur** : exclusion si le compte a moins de {cfg.raw.get('seller', {}).get('min_reviews', 3)} avis (0 compris, souvent des faux comptes) ou une note ≤ {cfg.raw.get('seller', {}).get('min_rating', 3.5)}★. Profil illisible → à vérifier.
 5. **Signaux statistiques** : prix < {cfg.thresholds['too_good_ratio']:.0%} de la médiane (< {cfg.thresholds['luxury_too_good_ratio']:.0%} pour les marques très contrefaites) → « trop beau pour être vrai ».
-6. **Marge** = revente estimée (médiane × état × {cfg.resale['asking_to_sold_ratio']:.0%}, car les prix affichés ne sont pas les prix vendus) − emballage − cotisations − (prix + 0,70 € + 5 % + port).
-7. **Score** /100 : décote vs marché, marge, ROI, décote vs neuf, liquidité de la catégorie, favoris, moins le risque.
+6. **Demande** : favoris de l'annonce vs ses comparables, et favoris par heure depuis sa première apparition (Vinted ne donne plus la date de mise en ligne : on la mesure scan après scan). 🔥 = forte demande.
+7. **Marge** = revente estimée (médiane × état × {cfg.resale['asking_to_sold_ratio']:.0%}, car les prix affichés ne sont pas les prix vendus) − emballage − cotisations − (prix + 0,70 € + 5 % + port).
+8. **Score** /100 : décote vs marché, marge, ROI, décote vs neuf, demande, moins le risque.
 
 **Limites** : les prix de marché sont des prix *demandés* ; le prix neuf vient d'un fichier de référence indicatif
 (`data/reference_prices.csv`, à compléter) ; une annonce « ok » n'est pas une garantie d'authenticité —

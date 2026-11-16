@@ -18,9 +18,11 @@ les meilleures opportunités dans un dashboard Streamlit.
 | **Arnaques** | WhatsApp, PayPal, virement, téléphone, e-mail, lien externe → **exclu**. |
 | **Contrefaçons** | replica, 1:1, copie, « pas authentique » → **exclu** (« pas de fake » n'est pas compté). « Style / façon Nike » et prix trop bas sur marque très contrefaite → **à vérifier**. |
 | **Annonces non valables** | boîte vide, photo, pour pièces, réservé, « je recherche », échange uniquement → **exclu**. Lots, tailles enfant, hors-sujet → **non comparables**. |
-| **Prix de marché** | médiane des annonces *saines* de la même recherche, ramenées à « Très bon état » (les faux prix ne polluent pas la médiane). |
+| **Prix de marché** | médiane des annonces *identiques ou très proches* : même **modèle** (déduit du titre), même **couleur**, même **taille** (tailles voisines regroupées). Si moins de 5 annonces, on élargit automatiquement (modèle + couleur → modèle → couleur → recherche entière). Prix ramenés à « Très bon état » : neuf étiqueté ×1,25 · neuf sans étiquette ×1,05 · TBE ×1 · bon ×0,75 · satisfaisant ×0,5. |
+| **Demande** | favoris de l'annonce comparés à ceux des annonces similaires, et favoris par heure depuis l'apparition de l'annonce (Vinted ne donne plus la date de mise en ligne : elle est mesurée scan après scan, donc fiable seulement pour les annonces apparues après le premier scan). 🔥 = forte demande. |
 | **Marge** | `revente estimée × (1 − cotisations) − emballage − (prix + 0,70 € + 5 % + port)` + **prix d'achat max** pour garder ta marge cible. |
-| **Score /100** | décote vs marché, marge, ROI, décote vs neuf, liquidité, favoris, moins le risque. |
+| **Vendeur** | exclu si moins de 3 avis ou note ≤ 3,5★. |
+| **Score /100** | décote vs marché, marge, ROI, décote vs neuf, demande, moins le risque. |
 
 ### Frais utilisés (vérifiés en novembre 2026, modifiables dans `config.yaml`)
 - **Acheteur** : « Frais Vinted » (ex-Protection acheteurs) = **0,70 € + 5 %** du prix de l'article.
@@ -80,6 +82,7 @@ vinted_tracker/
   sources/apify_source.py   alternative cloud via Apify
   background.py             scan en arrière-plan dans l'app (auto-actualisation)
   text_analysis.py          ⭐ détection faux prix / arnaques / contrefaçons
+  comparables.py            comparables fins : modèle / couleur / taille, avec repli
   pricing.py                frais, coût total, marge, prix d'achat max
   scoring.py                comparables, risque, score
   llm_check.py              second avis Claude (optionnel, sur les cas « à vérifier »)

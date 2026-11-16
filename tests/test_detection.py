@@ -152,3 +152,53 @@ def test_seller_rating_rule(rating, count, expected):
     target.seller_rating, target.seller_feedback_count = rating, count
     df = analyze(listings, CFG)
     assert df.loc[df["id"] == target.id, "status"].iloc[0] == expected
+
+
+# --- Comparables fins (modèle / couleur / taille) ----------------------------
+def test_attribute_extraction():
+    from vinted_tracker.comparables import candidate_model_tokens, extract_colors, size_bucket
+    assert extract_colors("New Balance 550 white green") == ("blanc", "vert")
+    assert extract_colors("Doudoune North Face noire") == ("noir",)
+    assert size_bucket("43", "Sneakers") == size_bucket("42", "Sneakers") == "42-44"
+    assert size_bucket("M", "Hauts") == size_bucket("L", "Hauts") == "M-L"
+    assert size_bucket("W31", "Bas") == "W30-32"
+    assert candidate_model_tokens("Veste Arc'teryx Beta LT noire taille M", "Arc'teryx", "arcteryx veste") == {"beta", "lt"}
+
+
+def test_comps_use_same_model_first():
+    """Une Beta LT doit être comparée aux Beta LT, pas à la moyenne des Arc'teryx."""
+    from vinted_tracker.models import Listing
+    mk = lambda i, t, p: Listing(id=str(i), title=t, price=p, search_name="Arc'teryx", category="Vestes",
+                                 brand="Arc'teryx", condition="Très bon état", size="M",
+                                 description="Très bon état, envoi rapide.", seller_feedback_count=50,
+                                 seller_rating=4.9)
+    ls = [mk(i, "Veste Arc'teryx Beta LT", 250 + i) for i in range(8)] + \
+         [mk(100 + i, "Veste Arc'teryx Atom", 120 + i) for i in range(8)] + \
+         [mk(999, "Veste Arc'teryx Beta LT", 150)]
+    df = analyze(ls, CFG).set_index("id")
+    assert df.loc["999", "comps_level"].startswith("modèle")
+    assert 250 <= df.loc["999", "comps_median"] <= 260      # médiane des Beta LT, pas ~190
+    assert bool(df.loc["999", "is_deal"])
+
+
+def test_scan_can_be_saved(tmp_path):
+    from fake_listings import generate_demo
+    from vinted_tracker.storage import save_scan
+    df = analyze(generate_demo(CFG), CFG)
+    save_scan(df, "test", db_path=tmp_path / "t.db", snapshot_path=tmp_path / "s.parquet")
+    assert (tmp_path / "s.parquet").exists()
+
+
+def test_two_successive_scans_track_first_seen(tmp_path):
+    """2e scan : l'historique de 1re apparition est relu (formats de date mélangés tolérés)."""
+    from fake_listings import generate_demo
+    from vinted_tracker.storage import load_first_seen, save_scan
+    ls = generate_demo(CFG)
+    snap = tmp_path / "s.parquet"
+    save_scan(analyze(ls[60:], CFG), "t", db_path=tmp_path / "t.db", snapshot_path=snap)
+    fs = load_first_seen(tmp_path / "first_seen.parquet")
+    df = analyze(ls, CFG, first_seen=fs)
+    save_scan(df, "t", db_path=tmp_path / "t.db", snapshot_path=snap)
+    # les 60 annonces apparues au 2e scan ont un âge réel ; celles du 1er scan, non
+    assert df["age_hours"].notna().sum() == 60
+    assert len(load_first_seen(tmp_path / "first_seen.parquet")) == len({l.id for l in ls})

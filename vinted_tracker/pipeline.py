@@ -122,4 +122,6 @@ def run_scan(cfg: Config, source: str = "auto", search_names: list[str] | None =
     if not listings:
         raise ScanError("Aucune annonce récupérée : vérifie la connexion ou les recherches de config.yaml.")
     checker = make_checker(cfg.llm.get("model", "claude-haiku-5-5")) if cfg.llm.get("enabled") else None
-    return analyze(listings, cfg, social_pct=social_pct, llm_checker=checker), used
+    from .storage import load_first_seen
+    return analyze(listings, cfg, social_pct=social_pct, llm_checker=checker,
+                   first_seen=load_first_seen()), used

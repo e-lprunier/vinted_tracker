@@ -17,7 +17,7 @@ import pandas as pd
 
 from .config import ROOT, load_config
 from .pipeline import run_scan
-from .storage import PREVIOUS_PATH, SNAPSHOT_PATH, save_scan
+from .storage import FIRST_SEEN_PATH, PREVIOUS_PATH, SNAPSHOT_PATH, save_scan
 
 log = logging.getLogger("vinted_tracker")
 
@@ -32,7 +32,7 @@ def _print_summary(df: pd.DataFrame, used: str, top: int):
 
 
 def _git_push():
-    rels = [str(pth.relative_to(ROOT)) for pth in (SNAPSHOT_PATH, PREVIOUS_PATH) if pth.exists()]
+    rels = [str(pth.relative_to(ROOT)) for pth in (SNAPSHOT_PATH, PREVIOUS_PATH, FIRST_SEEN_PATH) if pth.exists()]
     cmds = [["git", "add", *rels],
             ["git", "commit", "-m", f"scan: {datetime.now():%Y-%m-%d %H:%M}"],
             ["git", "pull", "--rebase", "--autostash"],
