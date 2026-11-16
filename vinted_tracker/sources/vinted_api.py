@@ -1,23 +1,30 @@
-"""Client pour l'API interne (non officielle) de Vinted.
+"""Client pour l'API interne (non officielle) de Vinted — version « svc-catalogue » (sept. 2026).
 
-⚠️ À savoir :
-- Ce n'est pas une API publique : les endpoints peuvent changer sans préavis.
-- Vinted est protégé par un anti-bot (Datadome / Cloudflare). Une requête
-  `requests` classique prend un 403 ; on utilise `curl_cffi`, qui imite
-  l'empreinte TLS d'un vrai Chrome, et on récupère d'abord les cookies de
-  session sur la page d'accueil.
-- Ça marche en général depuis une connexion résidentielle (ton PC). Depuis
-  un serveur cloud (Streamlit Cloud, GitHub Actions), les IP de datacenter
-  sont souvent bloquées : utilise alors la source Apify (sources/apify_source.py).
-- Reste raisonnable sur la fréquence (délais aléatoires, peu de pages) :
-  l'automatisation n'est pas prévue par les conditions de Vinted.
+Historique : en septembre 2026, Vinted a retiré `www.vinted.fr/api/v2/catalog/items`
+(qui répond 404 pour tout le monde). La recherche vit désormais sur un hôte dédié :
+
+    GET https://api.vinted.fr/svc-catalogue/items
+    Authorization: Bearer <cookie access_token_web>     (session anonyme, aucun compte requis)
+    X-Anon-Id: <en-tête X-Anon-Id / cookie anon_id>     (envoyé si disponible)
+    Locale / Accept-Language: fr-FR                     (sinon réponse en anglais)
+
+La session anonyme s'obtient en visitant d'abord la page d'accueil www (curl_cffi
+imite l'empreinte TLS de Chrome pour passer l'anti-bot). Dans la réponse, la marque,
+la taille et l'état sont regroupés dans `item_box` (first_line / second_line) et les
+URL sont relatives. La description n'est plus accessible en JSON : on la lit dans les
+balises OpenGraph de la page de l'annonce.
+
+⚠️ API non publique : elle peut encore changer. L'automatisation n'est pas prévue par
+les conditions de Vinted : reste sur des volumes et des délais raisonnables.
 """
 from __future__ import annotations
 
+import html as html_lib
 import json
 import random
 import re
 import time
+import unicodedata
 from typing import Iterator
 
 from ..config import Search
@@ -28,128 +35,237 @@ try:
 except ImportError:  # pragma: no cover
     cf_requests = None
 
+SEARCH_PATH = "/svc-catalogue/items"
+
+CONDITIONS = ["Neuf avec étiquette", "Neuf sans étiquette", "Très bon état", "Bon état", "Satisfaisant"]
+_COND_EN = {"new with tags": "Neuf avec étiquette", "new without tags": "Neuf sans étiquette",
+            "very good": "Très bon état", "good": "Bon état", "satisfactory": "Satisfaisant"}
+
 
 class VintedBlocked(RuntimeError):
-    pass
+    """Vinted refuse la connexion (anti-bot, 403/429)."""
+
+
+class VintedAPIError(RuntimeError):
+    """Réponse inattendue de l'API (endpoint changé, format changé…)."""
+
+
+# --------------------------------------------------------------------------- #
+# Parsing tolérant (l'API change souvent de forme)
+# --------------------------------------------------------------------------- #
+def _strip(s: str) -> str:
+    s = unicodedata.normalize("NFKD", s or "")
+    return "".join(c for c in s if not unicodedata.combining(c)).lower().strip()
 
 
 def _price(raw) -> float:
     if isinstance(raw, dict):
-        raw = raw.get("amount")
+        raw = raw.get("amount", raw.get("value"))
+    if raw is None:
+        return 0.0
+    txt = re.sub(r"[^\d,.\-]", "", str(raw)).replace(",", ".")
+    if txt.count(".") > 1:                      # "1.234.56" -> "1234.56"
+        head, _, tail = txt.rpartition(".")
+        txt = head.replace(".", "") + "." + tail
     try:
-        return float(str(raw).replace(",", "."))
-    except (TypeError, ValueError):
+        return float(txt)
+    except ValueError:
         return 0.0
 
 
+def _match_condition(part: str) -> str | None:
+    p = _strip(part)
+    for c in CONDITIONS:
+        if _strip(c) == p:
+            return c
+    for en, fr in _COND_EN.items():
+        if p == en:
+            return fr
+    return None
+
+
+def split_second_line(line: str) -> tuple[str, str]:
+    """« M · Très bon état » -> ("M", "Très bon état"), dans n'importe quel ordre."""
+    size, cond = "", ""
+    for part in re.split(r"\s*[·•|]\s*", line or ""):
+        if not part:
+            continue
+        c = _match_condition(part)
+        if c and not cond:
+            cond = c
+        elif not size:
+            size = part.strip()
+    return size, cond
+
+
 def parse_catalog_item(raw: dict, search: Search, domain: str) -> Listing:
-    photo = raw.get("photo") or {}
-    user = raw.get("user") or {}
-    url = raw.get("url") or f"https://{domain}/items/{raw.get('id')}"
+    base = f"https://{domain}"
+    box = raw.get("item_box") or {}
+    title = raw.get("title") or ""
+
+    brand = raw.get("brand_title") or ""
+    first = (box.get("first_line") or "").strip()
+    if not brand and first and _strip(first) != _strip(title):
+        brand = first
+    size, cond = split_second_line(box.get("second_line") or "")
+    size = raw.get("size_title") or size
+    status = raw.get("status")
+    if isinstance(status, dict):
+        status = status.get("title")
+    cond = (_match_condition(str(status)) if status else None) or cond
+
+    url = raw.get("url") or raw.get("path") or f"/items/{raw.get('id')}"
     if url.startswith("/"):
-        url = f"https://{domain}{url}"
+        url = base + url
+
+    photo = raw.get("photo") or (raw.get("photos") or [None])[0] or {}
+    if isinstance(photo, str):
+        photo_url = photo
+    else:
+        thumbs = photo.get("thumbnails") or []
+        photo_url = photo.get("url") or photo.get("full_size_url") or (thumbs[0].get("url") if thumbs else "")
+
+    price_raw = raw.get("price")
+    currency = price_raw.get("currency_code", "EUR") if isinstance(price_raw, dict) else raw.get("currency", "EUR")
+    user = raw.get("user") or {}
     return Listing(
         id=str(raw.get("id")),
-        title=raw.get("title", ""),
-        price=_price(raw.get("price")),
-        currency=(raw.get("price") or {}).get("currency_code", "EUR") if isinstance(raw.get("price"), dict)
-        else raw.get("currency", "EUR"),
+        title=title,
+        price=_price(price_raw if price_raw is not None else raw.get("price_numeric")),
+        currency=currency or "EUR",
         search_name=search.name,
         category=search.category,
-        brand=raw.get("brand_title", "") or "",
-        size=raw.get("size_title", "") or "",
-        condition=raw.get("status", "") or "",
+        brand=brand,
+        size=size or "",
+        condition=cond or "",
         url=url,
-        photo_url=photo.get("url") or photo.get("full_size_url") or "",
-        seller_login=user.get("login", "") or "",
-        favourites=int(raw.get("favourite_count") or 0),
+        photo_url=photo_url or "",
+        seller_login=user.get("login", "") if isinstance(user, dict) else "",
+        favourites=int(raw.get("favourite_count") or raw.get("favourites_count") or 0),
         views=int(raw.get("view_count") or 0),
         source="vinted_api",
     )
 
 
+def extract_description(page_html: str) -> str:
+    """Description depuis la page de l'annonce : JSON-LD, puis OpenGraph, puis meta description."""
+    for block in re.findall(r'<script[^>]+application/ld\+json[^>]*>(.*?)</script>', page_html, re.S):
+        try:
+            obj = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        for o in (obj if isinstance(obj, list) else [obj]):
+            if isinstance(o, dict) and o.get("description"):
+                return html_lib.unescape(o["description"])
+    for pat in (r'<meta[^>]+property="og:description"[^>]+content="([^"]*)"',
+                r'<meta[^>]+content="([^"]*)"[^>]+property="og:description"',
+                r'<meta[^>]+name="description"[^>]+content="([^"]*)"'):
+        m = re.search(pat, page_html)
+        if m:
+            return html_lib.unescape(m.group(1))
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# Client
+# --------------------------------------------------------------------------- #
 class VintedClient:
     def __init__(self, domain: str = "www.vinted.fr", min_delay: float = 1.5, max_delay: float = 3.5,
-                 impersonate: str = "chrome"):
+                 impersonate: str = "chrome", locale: str = "fr-FR"):
         if cf_requests is None:
             raise ImportError("pip install curl_cffi")
-        self.domain = domain
-        self.base = f"https://{domain}"
+        self.domain = domain if domain.startswith("www.") else "www." + domain
+        self.www = f"https://{self.domain}"
+        self.api = f"https://api.{self.domain[4:]}"
+        self.locale = locale
         self.min_delay, self.max_delay = min_delay, max_delay
         self.session = cf_requests.Session(impersonate=impersonate)
-        self._ready = False
+        self.token: str | None = None
+        self.anon_id: str | None = None
 
-    # ------------------------------------------------------------------ #
     def _sleep(self):
         time.sleep(random.uniform(self.min_delay, self.max_delay))
 
     def _bootstrap(self):
-        r = self.session.get(self.base + "/", timeout=30)
+        """Session anonyme : page d'accueil -> cookie access_token_web + identifiant anonyme."""
+        r = self.session.get(self.www + "/", timeout=30, headers={"Accept-Language": f"{self.locale},fr;q=0.9"})
         if r.status_code in (403, 429):
-            raise VintedBlocked(
-                f"Vinted a refusé la connexion ({r.status_code}). Tu es probablement sur une IP de "
-                "datacenter ou trop de requêtes ont été faites : réessaie plus tard depuis ta connexion "
-                "perso, ou utilise la source Apify.")
-        self._ready = True
+            raise VintedBlocked(f"page d'accueil refusée ({r.status_code}) — IP probablement filtrée par l'anti-bot")
+        tokens = [c.value for c in self.session.cookies.jar if c.name == "access_token_web" and c.value]
+        self.token = tokens[-1] if tokens else None
+        self.anon_id = (r.headers.get("x-anon-id")
+                        or next((c.value for c in self.session.cookies.jar if c.name == "anon_id" and c.value), None))
+        if not self.token:
+            # certaines versions ne posent le cookie que sur /catalog
+            r2 = self.session.get(self.www + "/catalog", timeout=30)
+            tokens = [c.value for c in self.session.cookies.jar if c.name == "access_token_web" and c.value]
+            self.token = tokens[-1] if tokens else None
+            self.anon_id = self.anon_id or r2.headers.get("x-anon-id")
 
-    def _get_json(self, path: str, params: dict | None = None, retry: bool = True) -> dict:
-        if not self._ready:
+    def _api_headers(self) -> dict:
+        h = {"Accept": "application/json, text/plain, */*",
+             "Accept-Language": f"{self.locale},fr;q=0.9",
+             "Locale": self.locale,
+             "Origin": self.www,
+             "Referer": self.www + "/catalog"}
+        if self.token:
+            h["Authorization"] = f"Bearer {self.token}"
+        if self.anon_id:
+            h["X-Anon-Id"] = self.anon_id
+        return h
+
+    def _get_api(self, path: str, params: dict, attempt: int = 0) -> dict:
+        if self.token is None and attempt == 0:
             self._bootstrap()
         self._sleep()
-        r = self.session.get(self.base + path, params=params, timeout=30, headers={
-            "Accept": "application/json, text/plain, */*",
-            "Referer": self.base + "/catalog",
-        })
-        if r.status_code == 401 and retry:      # cookie expiré -> on renouvelle
-            self._ready = False
-            return self._get_json(path, params, retry=False)
+        params = {k: v for k, v in params.items() if v not in (None, "")}   # 400 sur paramètres vides
+        r = self.session.get(self.api + path, params=params, timeout=30, headers=self._api_headers())
+        if r.status_code in (401, 403) and attempt < 2:    # token expiré -> nouvelle session
+            self.session.cookies.clear()
+            self._bootstrap()
+            return self._get_api(path, params, attempt + 1)
+        if r.status_code == 400 and "order" in params:      # paramètre refusé -> on le retire
+            params.pop("order")
+            return self._get_api(path, params, attempt + 1)
         if r.status_code in (403, 429):
-            raise VintedBlocked(f"Bloqué par Vinted ({r.status_code}) sur {path}")
-        r.raise_for_status()
-        return r.json()
+            raise VintedBlocked(f"{r.status_code} sur {path} (anti-bot / trop de requêtes)")
+        if r.status_code != 200:
+            raise VintedAPIError(f"HTTP {r.status_code} sur {self.api}{path} — {r.text[:160]!r}")
+        try:
+            return r.json()
+        except Exception as e:
+            raise VintedAPIError(f"réponse non-JSON sur {path} : {r.text[:160]!r}") from e
 
-    # ------------------------------------------------------------------ #
-    def search(self, search: Search, pages: int = 2, per_page: int = 96,
+    def search(self, search: Search, pages: int = 1, per_page: int = 96,
                order: str = "newest_first") -> Iterator[Listing]:
+        seen: set[str] = set()
         for page in range(1, pages + 1):
-            params = {"search_text": search.query, "page": page, "per_page": per_page, "order": order}
-            if search.price_max:
-                params["price_to"] = search.price_max
-            data = self._get_json("/api/v2/catalog/items", params)
-            items = data.get("items", [])
+            data = self._get_api(SEARCH_PATH, {
+                "search_text": search.query, "page": page, "per_page": per_page,
+                "order": order, "price_to": search.price_max or None,
+            })
+            items = data.get("items")
+            if items is None:
+                items = (data.get("data") or {}).get("items", []) if isinstance(data.get("data"), dict) else []
+            new = 0
             for raw in items:
+                if not isinstance(raw, dict) or str(raw.get("id")) in seen:
+                    continue
+                seen.add(str(raw.get("id")))
+                new += 1
                 yield parse_catalog_item(raw, search, self.domain)
-            if len(items) < per_page:
+            if new == 0 or len(items) < per_page:
                 break
 
     def fetch_description(self, listing: Listing) -> str:
-        """La recherche catalogue ne renvoie pas la description : on la récupère à part."""
+        """La recherche ne renvoie pas la description : on la lit sur la page de l'annonce."""
         try:
-            data = self._get_json(f"/api/v2/items/{listing.id}")
-            item = data.get("item") or {}
-            if item.get("description"):
-                fb = (item.get("user") or {}).get("feedback_count")
-                if fb is not None:
-                    listing.seller_feedback_count = int(fb)
-                return item["description"]
+            self._sleep()
+            r = self.session.get(listing.url, timeout=30, headers={"Accept-Language": f"{self.locale},fr;q=0.9"})
+            if r.status_code in (403, 429):
+                raise VintedBlocked(f"{r.status_code} sur la page d'une annonce")
+            return extract_description(r.text) if r.status_code == 200 else ""
         except VintedBlocked:
             raise
         except Exception:
-            pass
-        # Repli : page HTML de l'annonce (bloc JSON-LD ou meta description)
-        try:
-            self._sleep()
-            html = self.session.get(listing.url, timeout=30).text
-            for block in re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S):
-                try:
-                    obj = json.loads(block)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(obj, dict) and obj.get("description"):
-                    return obj["description"]
-            m = re.search(r'<meta name="description" content="([^"]*)"', html)
-            if m:
-                return m.group(1)
-        except Exception:
-            pass
-        return ""
+            return ""

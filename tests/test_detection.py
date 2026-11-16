@@ -110,3 +110,20 @@ def test_demo_pipeline_excludes_traps():
     assert not bad.any()
     # les faux prix à 1 € sont exclus
     assert (df.loc[df["price"] <= 1, "status"] == "exclu").all()
+
+
+# --- Parsing de la nouvelle API svc-catalogue (sept. 2026) ------------------
+def test_parse_svc_catalogue_item():
+    from vinted_tracker.sources.vinted_api import extract_description, parse_catalog_item, split_second_line
+    s = CFG.searches[0]
+    raw = {"id": 7012345678, "title": "Dunk Low Panda", "price": {"amount": "45.0", "currency_code": "EUR"},
+           "url": "/items/7012345678-dunk-low-panda", "photo": {"url": "https://images1.vinted.net/t/x.jpg"},
+           "item_box": {"first_line": "Nike", "second_line": "42 · Très bon état"},
+           "favourite_count": 14, "user": {"login": "bob"}}
+    l = parse_catalog_item(raw, s, "www.vinted.fr")
+    assert (l.price, l.brand, l.size, l.condition) == (45.0, "Nike", "42", "Très bon état")
+    assert l.url == "https://www.vinted.fr/items/7012345678-dunk-low-panda"
+    assert split_second_line("Bon état · M") == ("M", "Bon état")
+    assert split_second_line("Neuf avec étiquette") == ("", "Neuf avec étiquette")
+    page = '<head><meta property="og:description" content="Prix r&eacute;el 90&euro;, ne pas acheter"></head>'
+    assert extract_description(page).startswith("Prix réel 90")

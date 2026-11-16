@@ -88,15 +88,19 @@ def collect(cfg: Config, source: str = "auto", search_names: list[str] | None = 
     if source == "auto":
         try:
             return _collect_vinted(cfg, searches, progress), "vinted"
-        except Exception as e:  # blocage anti-bot, réseau…
+        except Exception as e:  # blocage anti-bot, API modifiée, réseau…
+            from .sources.vinted_api import VintedBlocked
             if os.environ.get("APIFY_TOKEN"):
                 log.warning("Vinted indisponible (%s) -> bascule sur Apify", e)
-                progress("Vinted bloque cette connexion, bascule sur Apify…", 0.0)
+                progress("Vinted indisponible depuis ce serveur, bascule sur Apify…", 0.0)
                 return _collect_apify(cfg, searches, progress), "apify"
-            raise ScanError(
-                f"Vinted a refusé la connexion depuis ce serveur ({e}). Lance le scan depuis ton PC "
-                "(python -m vinted_tracker watch --push) ou ajoute un APIFY_TOKEN pour scanner depuis le cloud."
-            ) from e
+            if isinstance(e, VintedBlocked):
+                msg = (f"Vinted bloque ce serveur ({e}). Lance le scan depuis ton PC "
+                       "(python -m vinted_tracker watch --push) ou ajoute un APIFY_TOKEN dans les Secrets.")
+            else:
+                msg = (f"L'API Vinted a répondu de façon inattendue ({e}). Vinted a peut-être encore modifié "
+                       "son API : le client (vinted_tracker/sources/vinted_api.py) est à mettre à jour.")
+            raise ScanError(msg) from e
     raise ValueError(f"Source inconnue : {source}")
 
 
