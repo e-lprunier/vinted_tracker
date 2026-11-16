@@ -1,0 +1,88 @@
+# =============================================================================
+# Vinted Tracker — configuration
+# Tous les montants sont en euros. Vérifie régulièrement les frais sur
+# https://www.vinted.fr/pricelist et au moment du paiement dans l'app.
+# =============================================================================
+
+vinted:
+  domain: "www.vinted.fr"
+  per_page: 96            # max accepté par l'API catalogue
+  pages_per_search: 2     # 2 x 96 = ~190 annonces par recherche
+  order: "newest_first"   # newest_first | price_low_to_high | relevance
+  min_delay_s: 1.5        # délai aléatoire entre requêtes (sois raisonnable)
+  max_delay_s: 3.5
+  fetch_details_for_top: 40   # n'aller chercher la description que pour les N
+                              # annonces les moins chères vs marché (économise des requêtes)
+
+# Source alternative si Vinted bloque (serveur cloud, GitHub Actions) : un actor Apify.
+# Chaque actor a son format d'entrée : adapte input_template à celui que tu choisis.
+apify:
+  actor_id: "fetch_cat/vinted-search-scraper"
+  input_template: {searchText: "{query}", maxItems: "{max_items}", domain: "www.vinted.fr"}
+  max_items: 150
+
+# --- Frais à l'ACHAT (payés par toi en tant qu'acheteur) ---------------------
+fees:
+  buyer_fee_fixed: 0.70     # "Frais Vinted" (ex-Protection acheteurs) : 0,70 € ...
+  buyer_fee_pct: 0.05       # ... + 5 % du prix de l'article
+  # Livraison point relais, par taille de colis (à calibrer avec tes paniers réels)
+  shipping:
+    petit: 3.30     # bijou, t-shirt, polo, accessoire (<= 1 kg)
+    moyen: 5.50     # jean, sweat, sneakers en boîte (1-2 kg)
+    grand: 7.50     # doudoune, veste épaisse, objet volumineux (2-5 kg)
+
+# --- Coûts à la REVENTE (payés par toi en tant que vendeur) ------------------
+resale:
+  seller_commission_pct: 0.0   # Vinted ne prélève pas de commission vendeur (particulier & Pro)
+  packaging_cost: 0.50         # carton / pochette / scotch
+  boost_cost: 0.0              # mets ~1-3 € si tu boostes systématiquement
+  social_contributions_pct: 0.0  # 0.123 si micro-entrepreneur achat-revente (cotisations URSSAF)
+  # Les prix observés sont des prix DEMANDÉS, pas des prix VENDUS : on applique une décote
+  asking_to_sold_ratio: 0.90
+  resale_quantile: 0.50        # 0.5 = médiane des comparables ; 0.4 = plus prudent
+
+# --- Seuils de détection ------------------------------------------------------
+thresholds:
+  min_comps: 8              # nb minimum d'annonces comparables pour juger un prix
+  min_margin_eur: 8.0       # marge nette minimale pour être une "bonne affaire"
+  min_roi: 0.30             # 30 % de retour sur le coût total d'achat
+  risk_exclude: 60          # score de risque >= 60 -> exclu
+  risk_review: 30           # 30-59 -> "à vérifier"
+  too_good_ratio: 0.15      # prix < 15 % de la médiane = trop beau pour être vrai
+  luxury_too_good_ratio: 0.35  # idem pour les marques très contrefaites
+
+# --- Ajustement par état (ramène tout à un équivalent "Très bon état") -------
+condition_factors:
+  "Neuf avec étiquette": 1.25
+  "Neuf sans étiquette": 1.15
+  "Très bon état": 1.00
+  "Bon état": 0.85
+  "Satisfaisant": 0.65
+
+# --- Analyse texte par LLM (optionnelle) --------------------------------------
+llm:
+  enabled: false                # nécessite ANTHROPIC_API_KEY dans l'environnement
+  model: "claude-haiku-5-5"     # modèle rapide et peu cher pour du tri
+  only_for_review: true         # n'appeler le LLM que sur les annonces "à vérifier"
+
+# --- Watchlist : ce qu'on scanne ---------------------------------------------
+# liquidity : 1 (lent) -> 3 (part en quelques jours)
+# counterfeit_risk : true = marque très contrefaite -> règles plus strictes
+# size_class : petit | moyen | grand (frais de port)
+searches:
+  - {name: "Nike Dunk Low",           query: "nike dunk low",            category: "Sneakers",  size_class: moyen, liquidity: 3, counterfeit_risk: true,  price_max: 120}
+  - {name: "Adidas Samba",            query: "adidas samba",             category: "Sneakers",  size_class: moyen, liquidity: 3, counterfeit_risk: false, price_max: 120}
+  - {name: "New Balance 550",         query: "new balance 550",          category: "Sneakers",  size_class: moyen, liquidity: 3, counterfeit_risk: false, price_max: 130}
+  - {name: "Nike Air Force 1",        query: "air force 1",              category: "Sneakers",  size_class: moyen, liquidity: 3, counterfeit_risk: true,  price_max: 100}
+  - {name: "Polo Ralph Lauren",       query: "polo ralph lauren",        category: "Hauts",     size_class: petit, liquidity: 3, counterfeit_risk: false, price_max: 60}
+  - {name: "Pull Ralph Lauren",       query: "pull ralph lauren",        category: "Hauts",     size_class: moyen, liquidity: 3, counterfeit_risk: false, price_max: 80}
+  - {name: "Polo Lacoste",            query: "polo lacoste",             category: "Hauts",     size_class: petit, liquidity: 2, counterfeit_risk: false, price_max: 60}
+  - {name: "Carhartt Detroit Jacket", query: "carhartt detroit jacket",  category: "Vestes",    size_class: grand, liquidity: 3, counterfeit_risk: false, price_max: 200}
+  - {name: "Levi's 501",              query: "levis 501",                category: "Bas",       size_class: moyen, liquidity: 3, counterfeit_risk: false, price_max: 60}
+  - {name: "The North Face Nuptse",   query: "north face nuptse",        category: "Vestes",    size_class: grand, liquidity: 3, counterfeit_risk: true,  price_max: 250}
+  - {name: "Arc'teryx",               query: "arcteryx veste",           category: "Vestes",    size_class: grand, liquidity: 2, counterfeit_risk: true,  price_max: 350}
+  - {name: "Patagonia polaire",       query: "patagonia polaire",        category: "Vestes",    size_class: moyen, liquidity: 2, counterfeit_risk: false, price_max: 120}
+  - {name: "Sézane",                  query: "sezane",                   category: "Femme",     size_class: petit, liquidity: 2, counterfeit_risk: false, price_max: 100}
+  - {name: "Bracelet Pandora",        query: "bracelet pandora",         category: "Bijoux",    size_class: petit, liquidity: 2, counterfeit_risk: true,  price_max: 80}
+  - {name: "Lego",                    query: "lego",                     category: "Objets",    size_class: moyen, liquidity: 2, counterfeit_risk: false, price_max: 150}
+  - {name: "Polaroid",                query: "polaroid appareil",        category: "Objets",    size_class: moyen, liquidity: 2, counterfeit_risk: false, price_max: 150}
