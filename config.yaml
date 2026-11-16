@@ -7,11 +7,11 @@
 vinted:
   domain: "www.vinted.fr"
   per_page: 96            # max accepté par l'API catalogue
-  pages_per_search: 2     # 2 x 96 = ~190 annonces par recherche
+  pages_per_search: 1     # 96 annonces les plus RÉCENTES par recherche (monte à 2 pour plus de comparables)
   order: "newest_first"   # newest_first | price_low_to_high | relevance
   min_delay_s: 1.5        # délai aléatoire entre requêtes (sois raisonnable)
   max_delay_s: 3.5
-  fetch_details_for_top: 40   # n'aller chercher la description que pour les N
+  fetch_details_for_top: 12   # n'aller chercher la description que pour les N
                               # annonces les moins chères vs marché (économise des requêtes)
 
 # Source alternative si Vinted bloque (serveur cloud, GitHub Actions) : un actor Apify.
@@ -20,6 +20,12 @@ apify:
   actor_id: "fetch_cat/vinted-search-scraper"
   input_template: {searchText: "{query}", maxItems: "{max_items}", domain: "www.vinted.fr"}
   max_items: 150
+
+# --- Dashboard ----------------------------------------------------------------
+app:
+  stale_after_minutes: 60      # au-delà, l'app signale que les annonces ne sont plus fraîches
+  auto_refresh_minutes: 30     # l'app relance un scan toute seule si les données sont plus vieilles
+                               # (uniquement si elle a accès à Vinted ou à un APIFY_TOKEN ; 0 = désactivé)
 
 # --- Frais à l'ACHAT (payés par toi en tant qu'acheteur) ---------------------
 fees:

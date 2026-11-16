@@ -16,6 +16,7 @@ from .config import ROOT
 
 DB_PATH = ROOT / "data" / "vinted.db"
 SNAPSHOT_PATH = ROOT / "data" / "latest_scan.parquet"
+PREVIOUS_PATH = ROOT / "data" / "previous_scan.parquet"
 
 
 def save_scan(df: pd.DataFrame, source: str, db_path: Path = DB_PATH,
@@ -25,6 +26,8 @@ def save_scan(df: pd.DataFrame, source: str, db_path: Path = DB_PATH,
     df["scan_id"], df["scan_source"] = scan_id, source
 
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    if snapshot_path.exists():   # on garde le scan précédent pour repérer les nouvelles annonces
+        PREVIOUS_PATH.write_bytes(snapshot_path.read_bytes())
     df.to_parquet(snapshot_path, index=False)
 
     with sqlite3.connect(db_path) as con:
@@ -40,6 +43,16 @@ def load_latest(snapshot_path: Path = SNAPSHOT_PATH) -> pd.DataFrame | None:
     if snapshot_path.exists():
         return pd.read_parquet(snapshot_path)
     return None
+
+
+def previous_ids(path: Path = PREVIOUS_PATH) -> set[str]:
+    """IDs présents au scan précédent (tout le reste est une nouvelle annonce)."""
+    if not path.exists():
+        return set()
+    try:
+        return set(pd.read_parquet(path, columns=["id"])["id"].astype(str))
+    except Exception:
+        return set()
 
 
 def seen_ids(db_path: Path = DB_PATH) -> set[str]:

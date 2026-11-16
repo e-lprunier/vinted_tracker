@@ -5,7 +5,7 @@ from vinted_tracker.config import load_config
 from vinted_tracker.models import Listing
 from vinted_tracker.pricing import compute_margin, max_buy_price, purchase_cost, resale_net
 from vinted_tracker.scoring import analyze
-from vinted_tracker.sources.demo import generate_demo
+from fake_listings import generate_demo
 from vinted_tracker.text_analysis import analyze_listing
 
 CFG = load_config()

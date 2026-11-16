@@ -37,12 +37,13 @@ git clone https://github.com/e-lprunier/vinted_tracker && cd vinted_tracker
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python -m vinted_tracker scan --source demo      # données fictives pour tester
-python -m vinted_tracker scan --source vinted    # vrai scan depuis ta connexion
-streamlit run streamlit_app.py                   # ouvre le dashboard
+python -m vinted_tracker scan                       # un scan des annonces Vinted réelles
+python -m vinted_tracker watch --every 30 --push    # rescan toutes les 30 min + push -> app en ligne à jour
+streamlit run streamlit_app.py                      # ouvre le dashboard en local
 ```
 
-Options utiles : `--search "Nike Dunk Low"` (répétable) pour limiter le scan, `--no-save`, `--top 30`.
+Options utiles : `--search "Nike Dunk Low"` (répétable), `--source vinted|apify|auto` (auto = Vinted direct, Apify si bloqué), `--top 30`.
+Un scan complet (16 recherches × 96 annonces les plus récentes + descriptions des meilleures) prend ~5-8 min, délais anti-blocage compris.
 Tests : `python -m pytest -q`.
 
 ## Déploiement Streamlit Cloud (lien public « Vinted Tracker »)
@@ -64,27 +65,28 @@ Les IP de serveurs (Streamlit Cloud, GitHub Actions) sont **généralement bloqu
 - **Simple** : tu scannes depuis ton PC (`--source vinted`), puis `git add data/latest_scan.parquet && git commit -m scan && git push` → l'app se met à jour.
 - **Automatique** : le workflow `.github/workflows/scan.yml` lance un scan **via Apify** toutes les 3 h et commit le snapshot. Ajoute le secret `APIFY_TOKEN` dans *Settings → Secrets → Actions* et la variable `SCAN_ENABLED=true` (ou lance-le à la main via *Actions → Scan Vinted → Run workflow*). Apify est payant à l'usage ; vérifie le format d'entrée de l'actor choisi (`config.yaml → apify`).
 
-Tant qu'aucun scan n'est commité, l'app affiche les **données de démo** (bandeau jaune « fictives »).
+L'app n'affiche **que des annonces réelles** : au chargement, si les données ont plus de 30 min (`config.yaml → app`), elle relance un scan en arrière-plan (Vinted direct, puis Apify si un `APIFY_TOKEN` est configuré). Si aucun des deux ne passe depuis le serveur, elle l'explique et attend le prochain snapshot poussé depuis ton PC. Le badge 🆕 marque les annonces apparues depuis le scan précédent.
 
 ---
 
 ## Structure
 
 ```
-streamlit_app.py            dashboard (5 onglets : affaires, marché, écartées, calculateur, méthode)
+streamlit_app.py            dashboard temps réel (affaires, marché, écartées, calculateur, méthode)
 config.yaml                 frais, seuils, watchlist de recherches
 data/reference_prices.csv   prix neufs indicatifs (à vérifier / compléter)
 vinted_tracker/
   sources/vinted_api.py     client API Vinted (curl_cffi, cookies de session, délais aléatoires)
   sources/apify_source.py   alternative cloud via Apify
-  sources/demo.py           données fictives avec pièges (faux prix, arnaques…)
+  background.py             scan en arrière-plan dans l'app (auto-actualisation)
   text_analysis.py          ⭐ détection faux prix / arnaques / contrefaçons
   pricing.py                frais, coût total, marge, prix d'achat max
   scoring.py                comparables, risque, score
   llm_check.py              second avis Claude (optionnel, sur les cas « à vérifier »)
   storage.py                SQLite (historique) + snapshot Parquet (lu par l'app)
   pipeline.py · cli.py
-tests/test_detection.py     28 tests (faux prix, arnaques, faux positifs, marge)
+tests/                      28 tests (faux prix, arnaques, faux positifs, marge) — seules les
+                            annonces fictives des tests vivent ici, jamais dans l'app
 ```
 
 ## Limites à connaître

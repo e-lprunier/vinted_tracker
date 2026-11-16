@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import html
 import os
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -17,7 +19,8 @@ import streamlit as st
 from vinted_tracker.config import load_config
 from vinted_tracker.pricing import compute_margin, purchase_cost
 from vinted_tracker.scoring import STATUS_EXCLUDED, STATUS_OK, STATUS_REVIEW, deal_score
-from vinted_tracker.storage import load_latest, save_scan
+from vinted_tracker.background import ScanManager
+from vinted_tracker.storage import load_latest, previous_ids
 
 st.set_page_config(page_title="Vinted Tracker", page_icon="🏷️", layout="wide")
 
@@ -34,6 +37,7 @@ except Exception:
 # --------------------------------------------------------------------------- #
 INK, INK2, MUTED, GRID, AXIS, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb"
 BLUE, GOOD, CRIT, WARN = "#2a78d6", "#0ca30c", "#d03b3b", "#fab219"
+PARIS = ZoneInfo("Europe/Paris")
 
 st.markdown(f"""
 <style>
@@ -43,6 +47,8 @@ st.markdown(f"""
   .vt-title {{font-size:2.1rem; font-weight:800; color:{INK};}}
   .vt-badge {{font-size:.72rem; font-weight:700; padding:3px 9px; border-radius:999px;
              background:#fff4d6; color:#7a5200; border:1px solid #f3d27a;}}
+  .vt-live {{font-size:.74rem; font-weight:700; padding:3px 9px; border-radius:999px;
+             background:#e7f6e7; color:#006300; border:1px solid #b9e3b9;}}
   .vt-sub {{color:{INK2}; font-size:.92rem; margin-bottom:18px;}}
   .kpi {{background:{SURFACE}; border:1px solid rgba(11,11,11,.08); border-radius:14px; padding:14px 16px;}}
   .kpi .l {{color:{INK2}; font-size:.8rem; font-weight:600; text-transform:uppercase; letter-spacing:.04em;}}
@@ -82,16 +88,47 @@ def pct(x):
 cfg = load_config()
 
 
-@st.cache_data(show_spinner="Analyse des annonces…")
-def get_data(mode: str, _nonce: int = 0) -> pd.DataFrame:
-    if mode == "Dernier scan":
-        df = load_latest()
-        if df is not None and len(df):
-            return df
-    from vinted_tracker.pipeline import run_scan
-    df = run_scan(cfg, "demo")
-    df["scan_id"], df["scan_source"] = datetime.now().strftime("%Y%m%dT%H%M%S"), "demo"
-    return df
+SNAP = Path(__file__).parent / "data" / "latest_scan.parquet"
+APP = cfg.raw.get("app", {})
+AUTO_EVERY = int(APP.get("auto_refresh_minutes", 30))
+STALE_AFTER = int(APP.get("stale_after_minutes", 60))
+
+
+@st.cache_data(show_spinner=False)
+def get_data(mtime: float) -> pd.DataFrame | None:
+    """Relit le snapshot quand le fichier change (mtime sert de clé de cache)."""
+    return load_latest()
+
+
+@st.cache_resource
+def get_manager() -> ScanManager:
+    return ScanManager()
+
+
+def snapshot_mtime() -> float:
+    return SNAP.stat().st_mtime if SNAP.exists() else 0.0
+
+
+def data_age_minutes(df: pd.DataFrame | None) -> float | None:
+    if df is None or df.empty or "scan_id" not in df:
+        return None
+    try:
+        t = datetime.strptime(str(df["scan_id"].iloc[0]), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (datetime.now(timezone.utc) - t).total_seconds() / 60
+
+
+def fmt_age(m: float | None) -> str:
+    if m is None:
+        return "—"
+    if m < 1:
+        return "à l'instant"
+    if m < 60:
+        return f"il y a {m:.0f} min"
+    if m < 48 * 60:
+        return f"il y a {m / 60:.0f} h"
+    return f"il y a {m / 1440:.0f} j"
 
 
 def recompute(df: pd.DataFrame, social_pct: float, min_margin: float, min_roi: float) -> pd.DataFrame:
@@ -117,33 +154,41 @@ def recompute(df: pd.DataFrame, social_pct: float, min_margin: float, min_roi: f
 
 
 # --------------------------------------------------------------------------- #
+# Données réelles + scan automatique en arrière-plan
+# --------------------------------------------------------------------------- #
+mgr = get_manager()
+shown_mtime = snapshot_mtime()
+df_raw = get_data(shown_mtime)
+age = data_age_minutes(df_raw)
+if mgr.should_auto_start(age, AUTO_EVERY):
+    mgr.start(cfg, "auto")
+
+
+@st.fragment(run_every=3)
+def scan_status():
+    """Barre de progression du scan ; recharge la page quand de nouvelles annonces arrivent."""
+    stt = mgr.state
+    if stt.running:
+        st.session_state["was_running"] = True
+        st.progress(stt.fraction, text=f"🔄 Actualisation des annonces Vinted… {stt.message}")
+    elif snapshot_mtime() != shown_mtime or st.session_state.pop("was_running", False):
+        st.rerun()   # scan terminé (succès ou échec) -> on recharge toute la page
+    elif stt.last_error and (df_raw is None or (age or 0) > STALE_AFTER):
+        st.warning(f"Dernière actualisation impossible : {stt.last_error}")
+
+
+# --------------------------------------------------------------------------- #
 # Barre latérale
 # --------------------------------------------------------------------------- #
 with st.sidebar:
     st.markdown("### 🏷️ Vinted Tracker")
-    mode = st.radio("Données", ["Dernier scan", "Démo (fictive)"], index=0,
-                    help="« Dernier scan » lit data/latest_scan.parquet. S'il n'existe pas encore, la démo s'affiche.")
-    if "nonce" not in st.session_state:
-        st.session_state.nonce = 0
-
-    with st.expander("🔄 Lancer un nouveau scan"):
-        src = st.selectbox("Source", ["vinted", "apify", "demo"],
-                           help="vinted : API Vinted (marche surtout depuis ton PC). "
-                                "apify : passe par Apify (APIFY_TOKEN requis, marche depuis le cloud).")
-        names = st.multiselect("Recherches", [s.name for s in cfg.searches], placeholder="Toutes")
-        if st.button("Scanner maintenant", type="primary", use_container_width=True):
-            from vinted_tracker.pipeline import run_scan
-            bar = st.progress(0.0, text="Démarrage…")
-            try:
-                new = run_scan(cfg, src, names or None,
-                               progress=lambda m, f: bar.progress(min(max(f, 0.0), 1.0), text=m))
-                save_scan(new, src)
-                st.session_state.nonce += 1
-                st.cache_data.clear()
-                st.success(f"{len(new)} annonces analysées.")
-                mode = "Dernier scan"
-            except Exception as e:  # blocage Vinted, token manquant…
-                st.error(f"Scan impossible : {e}")
+    st.caption(f"Annonces actualisées **{fmt_age(age)}**"
+               + (f" · rescan auto toutes les {AUTO_EVERY} min" if AUTO_EVERY else ""))
+    names = st.multiselect("Recherches à scanner", [s.name for s in cfg.searches], placeholder="Toutes")
+    if st.button("🔄 Actualiser maintenant", type="primary", use_container_width=True,
+                 disabled=mgr.state.running):
+        mgr.start(cfg, "auto", names or None)
+        st.rerun()
 
     st.markdown("---")
     st.markdown("**Hypothèses de marge**")
@@ -151,11 +196,36 @@ with st.sidebar:
     min_margin = st.slider("Marge nette minimale", 0, 50, int(cfg.thresholds["min_margin_eur"]), format="%d €")
     min_roi = st.slider("ROI minimal", 0, 200, int(cfg.thresholds["min_roi"] * 100), step=5, format="%d %%") / 100
 
-df_all = get_data("Dernier scan" if mode == "Dernier scan" else "Démo", st.session_state.nonce)
-df_all = recompute(df_all, 0.123 if social else cfg.resale["social_contributions_pct"], min_margin, min_roi)
+# --------------------------------------------------------------------------- #
+# Pas encore d'annonces : on l'explique au lieu d'afficher du faux
+# --------------------------------------------------------------------------- #
+if df_raw is None or df_raw.empty:
+    st.markdown('<div class="vt-header"><span class="vt-title">Vinted Tracker</span></div>'
+                '<div class="vt-sub">Bonnes affaires Vinted réelles, après frais, livraison et filtrage des faux prix.'
+                '</div>', unsafe_allow_html=True)
+    scan_status()
+    if not mgr.state.running:
+        st.info("**Aucune annonce Vinted chargée pour l'instant.** Clique sur « Actualiser maintenant ».")
+    with st.expander("Si l'actualisation échoue depuis l'app en ligne", expanded=bool(mgr.state.last_error)):
+        st.markdown("""
+Vinted bloque souvent les serveurs (Streamlit Cloud, GitHub). Deux solutions :
+
+1. **Depuis ton PC** (gratuit) — les annonces sont scannées chez toi et poussées sur GitHub, l'app se met à jour toute seule :
+   ```bash
+   python -m vinted_tracker watch --every 30 --push
+   ```
+2. **Depuis le cloud** — ajoute `APIFY_TOKEN` dans les *Secrets* de l'app Streamlit : l'actualisation passera par Apify si Vinted bloque.
+""")
+    st.stop()
+
+df_all = recompute(df_raw, 0.123 if social else cfg.resale["social_contributions_pct"], min_margin, min_roi)
+prev = previous_ids()
+df_all["is_new"] = ~df_all["id"].astype(str).isin(prev) if prev else False
 
 with st.sidebar:
     st.markdown("**Filtres**")
+    only_new = st.checkbox("🆕 Nouvelles annonces seulement", value=False, disabled=not prev,
+                           help="Annonces apparues depuis le scan précédent.")
     cats = st.multiselect("Catégories", sorted(df_all["category"].unique()), placeholder="Toutes")
     searches = st.multiselect("Recherches", sorted(df_all["search_name"].unique()), placeholder="Toutes")
     budget = st.slider("Prix d'achat max", 5, 400, 400, step=5, format="%d €")
@@ -167,6 +237,8 @@ with st.sidebar:
                + " / ".join(f"{k} {eur(v)}" for k, v in cfg.fees["shipping"].items()))
 
 df = df_all.copy()
+if only_new:
+    df = df[df["is_new"]]
 if cats:
     df = df[df["category"].isin(cats)]
 if searches:
@@ -178,20 +250,24 @@ excluded = df[df["status"] == STATUS_EXCLUDED]
 # --------------------------------------------------------------------------- #
 # En-tête & KPIs
 # --------------------------------------------------------------------------- #
-source = str(df_all["scan_source"].iloc[0]) if "scan_source" in df_all else "demo"
-scan_id = str(df_all["scan_id"].iloc[0]) if "scan_id" in df_all else ""
+source = str(df_all["scan_source"].iloc[0]) if "scan_source" in df_all else "vinted"
 try:
-    when = datetime.strptime(scan_id[:15], "%Y%m%dT%H%M%S").strftime("%d/%m/%Y à %H:%M")
-except ValueError:
-    when = scan_id
-badge = '<span class="vt-badge">DONNÉES DE DÉMO — FICTIVES</span>' if source == "demo" else ""
+    when = (datetime.strptime(str(df_all["scan_id"].iloc[0]), "%Y%m%dT%H%M%SZ")
+            .replace(tzinfo=timezone.utc).astimezone(PARIS).strftime("%d/%m à %H:%M"))
+except (ValueError, KeyError):
+    when = "—"
+stale = age is not None and age > STALE_AFTER
+badge = (f'<span class="vt-badge">⏳ annonces {fmt_age(age)}</span>' if stale
+         else f'<span class="vt-live">● en direct · {fmt_age(age)}</span>')
 st.markdown(f'<div class="vt-header"><span class="vt-title">Vinted Tracker</span>{badge}</div>'
-            f'<div class="vt-sub">Bonnes affaires détectées après frais Vinted, livraison et filtrage des faux prix '
-            f'· source : <b>{source}</b> · scan du {when}</div>', unsafe_allow_html=True)
+            f'<div class="vt-sub">Annonces Vinted réelles · bonnes affaires après frais Vinted, livraison et filtrage '
+            f'des faux prix · scan du {when} via <b>{source}</b></div>', unsafe_allow_html=True)
+scan_status()
 
 k = st.columns(5)
 kpis = [
-    ("Annonces analysées", f"{len(df):,}".replace(",", " "), f"{df['search_name'].nunique()} recherches"),
+    ("Annonces analysées", f"{len(df):,}".replace(",", " "),
+     f"{int(df['is_new'].sum())} nouvelles" if prev else f"{df['search_name'].nunique()} recherches"),
     ("Bonnes affaires", f"{len(deals)}", f"marge ≥ {min_margin} € et ROI ≥ {min_roi:.0%}"),
     ("Marge potentielle", eur(deals["margin"].head(10).sum(), 0), "sur les 10 meilleures"),
     ("ROI médian", pct(deals["roi"].median()) if len(deals) else "—", "des bonnes affaires"),
@@ -224,7 +300,7 @@ with tab_deals:
 <div class="card">
   <div class="top">
     <img src="{html.escape(str(r['photo_url'] or ''))}" alt="">
-    <div><div class="t">{html.escape(r['title'])}</div>
+    <div><div class="t">{'🆕 ' if r.get('is_new') else ''}{html.escape(r['title'])}</div>
       <div class="s">{html.escape(r['search_name'])} · {html.escape(str(r['condition']))}
         {(' · ' + html.escape(str(r['size']))) if r['size'] else ''}</div></div>
   </div>
@@ -243,7 +319,7 @@ with tab_deals:
             st.write("")
 
         st.markdown("#### Toutes les bonnes affaires")
-        table = deals[["photo_url", "title", "search_name", "condition", "price", "total_cost", "resale_price",
+        table = deals[["photo_url", "is_new", "title", "search_name", "condition", "price", "total_cost", "resale_price",
                        "margin", "roi", "max_buy_price", "discount_vs_market", "decote_neuf", "deal_score",
                        "status", "url"]].copy()
         table["roi"] *= 100
@@ -253,6 +329,7 @@ with tab_deals:
             table, hide_index=True, use_container_width=True, height=460,
             column_config={
                 "photo_url": st.column_config.ImageColumn("", width="small"),
+                "is_new": st.column_config.CheckboxColumn("🆕", width="small", help="Nouvelle depuis le scan précédent"),
                 "title": st.column_config.TextColumn("Annonce", width="medium"),
                 "search_name": "Recherche", "condition": "État",
                 "price": st.column_config.NumberColumn("Prix", format="%.2f €"),
@@ -270,7 +347,7 @@ with tab_deals:
                 "status": "Statut",
                 "url": st.column_config.LinkColumn("Lien", display_text="Ouvrir ↗"),
             })
-        st.download_button("Exporter en CSV", deals.drop(columns=["photo_url"]).to_csv(index=False).encode("utf-8"),
+        st.download_button("Exporter en CSV", deals.drop(columns=["photo_url"], errors="ignore").to_csv(index=False).encode("utf-8"),
                            "bonnes_affaires.csv", "text/csv")
 
 # --------------------------------------------------------------------------- #

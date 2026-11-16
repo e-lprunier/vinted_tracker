@@ -1,4 +1,4 @@
-"""Modèle de données commun à toutes les sources (API Vinted, Apify, démo)."""
+"""Modèle de données commun à toutes les sources (API Vinted, Apify)."""
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field

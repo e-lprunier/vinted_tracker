@@ -1,4 +1,4 @@
-"""Générateur de données de DÉMO (fictives) pour tester le dashboard sans scraper.
+"""Annonces FICTIVES utilisées UNIQUEMENT par les tests (jamais par l'app).
 
 Les annonces sont inventées mais réalistes, et incluent volontairement des
 pièges (faux prix, arnaques, contrefaçons, lots, recherches…) pour vérifier
@@ -9,8 +9,8 @@ from __future__ import annotations
 import base64
 import random
 
-from ..config import Config
-from ..models import Listing
+from vinted_tracker.config import Config
+from vinted_tracker.models import Listing
 
 # Prix médian "Très bon état" fictif par recherche (ordre de grandeur Vinted)
 BASE_PRICES = {
