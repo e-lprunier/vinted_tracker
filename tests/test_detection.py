@@ -141,7 +141,8 @@ def test_parse_seller_profile():
 @pytest.mark.parametrize("rating,count,expected", [
     (3.0, 25, "exclu"),          # mal noté avec assez d'avis -> exclu
     (3.5, 64, "exclu"),          # 3,5 pile -> exclu ("pas plus de 3,5")
-    (3.0, 2, "à vérifier"),      # mal noté mais 2 avis -> signalé seulement
+    (4.8, 2, "exclu"),           # bonne note mais 2 avis -> exclu
+    (None, 0, "exclu"),          # aucun avis -> exclu (faux comptes)
     (4.9, 140, "ok"),            # bon vendeur -> rien
 ])
 def test_seller_rating_rule(rating, count, expected):

@@ -500,7 +500,7 @@ with tab_method:
    - **pas l'article** : boîte vide, photo, pour pièces ; **pas une vente** : réservé, recherche, échange uniquement.
    Les montants « acheté 120 € en boutique » sont reconnus comme **prix neuf**, pas comme faux prix.
 3. **Prix de marché** : médiane des annonces comparables *saines* (hors faux prix, lots, tailles enfant, hors-sujet), ramenées à l'état « Très bon état ».
-4. **Fiabilité du vendeur** : note ≤ {cfg.raw.get('seller', {}).get('min_rating', 3.5)}★ avec au moins {cfg.raw.get('seller', {}).get('min_reviews_for_rating', 3)} avis → exclu ; mauvaise note sur moins d'avis → à vérifier ; compte sans avis → signalé si le prix est anormalement bas.
+4. **Fiabilité du vendeur** : exclusion si le compte a moins de {cfg.raw.get('seller', {}).get('min_reviews', 3)} avis (0 compris, souvent des faux comptes) ou une note ≤ {cfg.raw.get('seller', {}).get('min_rating', 3.5)}★. Profil illisible → à vérifier.
 5. **Signaux statistiques** : prix < {cfg.thresholds['too_good_ratio']:.0%} de la médiane (< {cfg.thresholds['luxury_too_good_ratio']:.0%} pour les marques très contrefaites) → « trop beau pour être vrai ».
 6. **Marge** = revente estimée (médiane × état × {cfg.resale['asking_to_sold_ratio']:.0%}, car les prix affichés ne sont pas les prix vendus) − emballage − cotisations − (prix + 0,70 € + 5 % + port).
 7. **Score** /100 : décote vs marché, marge, ROI, décote vs neuf, liquidité de la catégorie, favoris, moins le risque.

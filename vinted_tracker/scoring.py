@@ -120,19 +120,15 @@ def analyze(listings: list[Listing], cfg: Config, social_pct: float | None = Non
                 flags.append(Flag("too_good", f"{label} ({ratio:.0%} de la médiane)", 45))
         fb, rating = r.get("seller_feedback_count"), r.get("seller_rating")
         sc = cfg.raw.get("seller", {})
-        min_rating, min_n = sc.get("min_rating", 3.5), sc.get("min_reviews_for_rating", 3)
-        if pd.notna(rating) and pd.notna(fb) and int(fb) > 0 and rating <= min_rating:
-            label = f"Vendeur mal noté ({rating:.1f}★ sur {int(fb)} avis)".replace(".", ",")
-            if int(fb) >= min_n:
-                flags.append(Flag("bad_seller", label, 70, hard=True))
-            else:
-                flags.append(Flag("bad_seller_few", label + " — trop peu d'avis pour conclure", 30))
-        elif pd.notna(fb) and int(fb) == 0:
-            if sc.get("exclude_no_reviews", False):
-                flags.append(Flag("no_reviews", "Vendeur sans aucun avis", 60, hard=True))
-            elif not math.isnan(ratio) and ratio < 0.5:
-                flags.append(Flag("new_seller", "Vendeur sans évaluation + prix très bas", 15))
-
+        min_rating, min_n = sc.get("min_rating", 3.5), sc.get("min_reviews", 3)
+        if pd.notna(fb) and int(fb) < min_n:
+            flags.append(Flag("few_reviews", f"Vendeur avec {int(fb)} avis (minimum {min_n})", 70, hard=True))
+        elif pd.notna(rating) and rating <= min_rating:
+            flags.append(Flag("bad_seller", f"Vendeur mal noté ({rating:.1f}★ sur {int(fb)} avis)".replace(".", ","),
+                              70, hard=True))
+        elif pd.isna(fb) and sc.get("check_reviews", True) and not math.isnan(ratio) and ratio < 0.85:
+            # profil non lu (erreur ou annonce non détaillée) sur une annonce sous le marché
+            flags.append(Flag("seller_unknown", "Avis du vendeur non vérifiés", 30))
         risk = min(100, sum(f.weight for f in flags))
         hard = any(f.hard for f in flags)
         if hard or risk >= th["risk_exclude"]:

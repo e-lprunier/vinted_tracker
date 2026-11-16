@@ -61,8 +61,7 @@ thresholds:
 seller:
   check_reviews: true          # lit le profil du vendeur des annonces candidates (1 requête / vendeur)
   min_rating: 3.5              # note ≤ 3,5/5 -> exclue (il faut strictement plus)
-  min_reviews_for_rating: 3    # en dessous, une mauvaise note ne fait que signaler ("à vérifier")
-  exclude_no_reviews: false    # true = exclure aussi les comptes sans aucun avis
+  min_reviews: 3               # moins de 3 avis (0 compris) -> exclue : souvent des faux comptes
 
 # --- Ajustement par état (ramène tout à un équivalent "Très bon état") -------
 condition_factors:
